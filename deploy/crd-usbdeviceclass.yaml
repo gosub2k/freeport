@@ -1,0 +1,77 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: usbdeviceclasses.frankencluster.local
+spec:
+  group: frankencluster.local
+  scope: Cluster
+  names:
+    plural: usbdeviceclasses
+    singular: usbdeviceclass
+    kind: USBDeviceClass
+    shortNames:
+      - usbclass
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Vendor
+          type: string
+          jsonPath: .spec.match.vendor
+        - name: Model
+          type: string
+          jsonPath: .spec.match.model
+        - name: Serials
+          type: string
+          jsonPath: .spec.match.serials
+          priority: 1
+        - name: AutoFormat
+          type: boolean
+          jsonPath: .spec.initialize.autoFormat
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["match"]
+              properties:
+                match:
+                  type: object
+                  description: |
+                    Criteria that select physical drives. Match by product
+                    (vendor + model) or by serial allowlist, or both.
+                    At least one field must be set; all set fields must equal
+                    the device's kernel-reported value.
+                  properties:
+                    vendor:
+                      type: string
+                    model:
+                      type: string
+                    serials:
+                      type: array
+                      items:
+                        type: string
+                initialize:
+                  type: object
+                  description: |
+                    What to do the first time a matching device is seen.
+                  properties:
+                    autoFormat:
+                      type: boolean
+                      default: false
+                      description: |
+                        If true and the device has no filesystem signature,
+                        run mkfs.ext4 on it.
+                    fsLabel:
+                      type: string
+                      description: Filesystem label set when autoFormat fires.
+                    directories:
+                      type: array
+                      items:
+                        type: string
+                      description: |
+                        Directories to create under the mountpoint when the
+                        filesystem is blank. An init marker is written after.

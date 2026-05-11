@@ -18,15 +18,19 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: Model
+        - name: Class
           type: string
-          jsonPath: .spec.model
+          jsonPath: .spec.class
         - name: Node
           type: string
           jsonPath: .status.currentNode
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Product
+          type: string
+          jsonPath: .spec.model
+          priority: 1
         - name: FS-UUID
           type: string
           jsonPath: .status.fsUUID
@@ -50,13 +54,15 @@ spec:
                 serial:
                   type: string
                   description: USB device serial number (canonical identity).
-                model:
+                class:
                   type: string
-                  description: Name of the matched usb-storage model.
+                  description: |
+                    Name of the matched USBDeviceClass. Empty if no class
+                    matched the device.
                 vendor:
                   type: string
                   description: Kernel-reported vendor string.
-                modelString:
+                model:
                   type: string
                   description: Kernel-reported product string.
                 firstSeen:
@@ -67,7 +73,7 @@ spec:
               properties:
                 fsUUID:
                   type: string
-                  description: Filesystem UUID (may change if the device is reformatted).
+                  description: Filesystem UUID (changes if the device is reformatted).
                 currentNode:
                   type: string
                   description: Node that currently holds the device, or last held it.

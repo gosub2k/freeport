@@ -1,0 +1,37 @@
+# Two example classes. Apply them with `kubectl apply -f` and check the
+# result with `kubectl get usbdeviceclass` (alias: `kubectl get usbclass`).
+#
+# Match by vendor + model — every drive of this product across every node
+# matches this class.
+---
+apiVersion: frankencluster.local/v1
+kind: USBDeviceClass
+metadata:
+  name: cruzer-blade
+spec:
+  match:
+    vendor: "SanDisk"
+    model: "Cruzer Blade"
+  initialize:
+    autoFormat: true
+    fsLabel: "frankenstore"
+    directories:
+      - projects
+      - kv
+      - files
+---
+# Match by serial — handy when you have a couple of specific drives you've
+# explicitly designated for a workload.
+apiVersion: frankencluster.local/v1
+kind: USBDeviceClass
+metadata:
+  name: backup-set
+spec:
+  match:
+    serials:
+      - "AA00112233445566"
+      - "BB00778899AABBCC"
+  initialize:
+    autoFormat: false
+    directories:
+      - backups

@@ -31,8 +31,6 @@ spec:
                   fieldPath: spec.nodeName
             - name: PROVISIONER_NAMESPACE
               value: "dimsum"
-            - name: MODELS_CONFIG
-              value: "/etc/usb-storage/models.yaml"
             - name: POLL_INTERVAL
               value: "10"
             - name: HEALTH_PORT
@@ -69,9 +67,6 @@ spec:
             - name: host-proc
               mountPath: /host/proc
               readOnly: true
-            - name: models
-              mountPath: /etc/usb-storage
-              readOnly: true
           resources:
             requests:
               cpu: 10m
@@ -96,9 +91,6 @@ spec:
           # which we need to know what's mounted where.
           hostPath:
             path: /proc
-        - name: models
-          configMap:
-            name: usb-storage-models
 ---
 # Headless Service so /health is reachable per-pod from outside the pod.
 apiVersion: v1

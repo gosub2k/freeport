@@ -39,6 +39,9 @@ rules:
   - apiGroups: ["frankencluster.local"]
     resources: ["usbdevices/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["frankencluster.local"]
+    resources: ["usbdeviceclasses"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

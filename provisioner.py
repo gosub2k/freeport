@@ -37,7 +37,6 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import yaml
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
@@ -47,10 +46,10 @@ from kubernetes.client.exceptions import ApiException
 
 PROVISIONER = "frankencluster.local/usb-storage"
 
-UUID_LABEL_PREFIX = "usb-storage.frankencluster.local/uuid-"
+CLASS_LABEL_PREFIX = "usb-storage.frankencluster.local/class-"
 SERIAL_LABEL = "usb-storage.frankencluster.local/serial"
 NODE_LABEL = "usb-storage.frankencluster.local/node"
-MODEL_LABEL = "usb-storage.frankencluster.local/model"
+CLASS_LABEL = "usb-storage.frankencluster.local/class"
 
 PROVISIONER_ANN = "volume.beta.kubernetes.io/storage-provisioner"
 PROVISIONER_ANN_NEW = "volume.kubernetes.io/storage-provisioner"
@@ -68,13 +67,13 @@ USBDEVICE_GROUP = "frankencluster.local"
 USBDEVICE_VERSION = "v1"
 USBDEVICE_PLURAL = "usbdevices"
 USBDEVICE_KIND = "USBDevice"
+USBDEVICECLASS_PLURAL = "usbdeviceclasses"
 
 DATA_MOUNTPOINT = "/data"  # canonical mountpoint on the host
 NSENTER = ["nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"]
 
 NODE_NAME = os.environ["NODE_NAME"]
 PROVISIONER_NS = os.environ.get("PROVISIONER_NAMESPACE", "dimsum")
-MODELS_CONFIG_PATH = os.environ.get("MODELS_CONFIG", "/etc/usb-storage/models.yaml")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
 HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8080"))
 HEALTH_STALE_AFTER = 60
@@ -269,27 +268,52 @@ def discover_devices():
 # Device models
 # --------------------------------------------------------------------------- #
 
-def load_models():
-    if not os.path.exists(MODELS_CONFIG_PATH):
-        log.warning("models config %s missing; no devices will be registered",
-                    MODELS_CONFIG_PATH)
-        return []
-    with open(MODELS_CONFIG_PATH) as f:
-        data = yaml.safe_load(f) or {}
-    models = data.get("models", []) or []
-    log.info("loaded %d device model(s): %s",
-             len(models), [m.get("name", "?") for m in models])
-    return models
+def load_classes(co):
+    """Read every USBDeviceClass CR and normalize to a flat list of dicts."""
+    try:
+        lst = co.list_cluster_custom_object(
+            USBDEVICE_GROUP, USBDEVICE_VERSION, USBDEVICECLASS_PLURAL,
+        )
+    except ApiException as e:
+        if e.status == 404:
+            log.warning("USBDeviceClass CRD not installed; no classes available")
+            return []
+        raise
+    classes = []
+    for item in lst.get("items", []):
+        spec = item.get("spec") or {}
+        classes.append({
+            "name": item["metadata"]["name"],
+            "match": spec.get("match") or {},
+            "initialize": spec.get("initialize") or {},
+        })
+    return classes
 
 
-def match_model(device, models):
-    """First model whose match-dict matches all the fields the device exposes."""
-    for m in models:
-        criteria = m.get("match", {}) or {}
-        if not criteria:
+def device_class_for(device, classes):
+    """Return the first USBDeviceClass whose match criteria fit `device`.
+
+    Match rules:
+      - serials (list): the device's serial must be in the list.
+      - vendor: device's vendor must equal exactly.
+      - model: device's model must equal exactly.
+    Every field that's set must pass; an empty match block never matches.
+    """
+    for c in classes:
+        m = c["match"]
+        if not m:
             continue
-        if all(device.get(k, "") == v for k, v in criteria.items()):
-            return m
+        if "serials" in m:
+            if device.get("serial") not in (m["serials"] or []):
+                continue
+        if "vendor" in m and device.get("vendor", "") != m["vendor"]:
+            continue
+        if "model" in m and device.get("model", "") != m["model"]:
+            continue
+        # All non-empty conditions matched. Reject pure-empty match blocks.
+        if not any(k in m for k in ("serials", "vendor", "model")):
+            continue
+        return c
     return None
 
 
@@ -323,9 +347,9 @@ def registry_load(co):
             continue
         entries[serial] = {
             "serial": serial,
-            "model": spec.get("model"),
+            "class": spec.get("class"),
             "vendor": spec.get("vendor"),
-            "modelString": spec.get("modelString"),
+            "model": spec.get("model"),
             "firstSeen": spec.get("firstSeen"),
             "fsUUID": status.get("fsUUID"),
             "currentNode": status.get("currentNode"),
@@ -345,9 +369,9 @@ def registry_upsert(co, serial, entry):
         "metadata": {"name": name},
         "spec": {
             "serial": serial,
-            "model": entry.get("model"),
+            "class": entry.get("class"),
             "vendor": entry.get("vendor"),
-            "modelString": entry.get("modelString"),
+            "model": entry.get("model"),
             "firstSeen": entry.get("firstSeen"),
         },
     }
@@ -448,12 +472,16 @@ def initialize_device(mountpoint, model, serial):
 # Node labels
 # --------------------------------------------------------------------------- #
 
-def update_node_labels(v1, fs_uuids):
-    desired = {f"{UUID_LABEL_PREFIX}{u}": "true" for u in fs_uuids if u}
+def update_node_labels(v1, class_names):
+    """Label this node with class-<name>=true for every class present locally.
+
+    Replaces / removes any class labels that no longer apply.
+    """
+    desired = {f"{CLASS_LABEL_PREFIX}{c}": "true" for c in class_names if c}
     node = v1.read_node(NODE_NAME)
     current = {
         k: v for k, v in (node.metadata.labels or {}).items()
-        if k.startswith(UUID_LABEL_PREFIX)
+        if k.startswith(CLASS_LABEL_PREFIX)
     }
     patch = {}
     for k, v in desired.items():
@@ -476,16 +504,13 @@ def _matches_our_provisioner(annotations):
             or annotations.get(PROVISIONER_ANN_NEW) == PROVISIONER)
 
 
-def _build_pv(pvc, sc, sc_uuid, node, serial, model_name):
+def _build_pv(pvc, sc, class_name, node, serial):
     pv_name = f"usb-{pvc.metadata.namespace}-{pvc.metadata.name}-{pvc.metadata.uid[:8]}"
-    labels = {
-        "usb-storage.frankencluster.local/uuid": sc_uuid,
-        NODE_LABEL: node,
-    }
+    labels = {NODE_LABEL: node}
+    if class_name:
+        labels[CLASS_LABEL] = class_name
     if serial:
         labels[SERIAL_LABEL] = serial
-    if model_name:
-        labels[MODEL_LABEL] = model_name
 
     return client.V1PersistentVolume(
         metadata=client.V1ObjectMeta(
@@ -528,7 +553,8 @@ def _node_affinity(node):
     )
 
 
-def provision_pvc(v1, storage_v1, pvc, fs_uuid_to_device):
+def provision_pvc(v1, storage_v1, pvc, devices):
+    """Provision a PV for `pvc` if its StorageClass deviceClass matches a local device."""
     if pvc.spec.volume_name:
         return
     sc_name = pvc.spec.storage_class_name
@@ -542,23 +568,29 @@ def provision_pvc(v1, storage_v1, pvc, fs_uuid_to_device):
         raise
     if sc.provisioner != PROVISIONER:
         return
-    sc_uuid = (sc.parameters or {}).get("uuid")
-    if not sc_uuid:
-        log.warning("StorageClass %s missing 'uuid' parameter", sc_name)
-        return
-    if sc_uuid not in fs_uuid_to_device:
+    sc_class = (sc.parameters or {}).get("deviceClass")
+    if not sc_class:
+        log.warning("StorageClass %s missing 'deviceClass' parameter", sc_name)
         return
 
     selected = (pvc.metadata.annotations or {}).get(SELECTED_NODE_ANN)
     if selected and selected != NODE_NAME:
         return
 
-    device = fs_uuid_to_device[sc_uuid]
+    # Pick a local, ready (mounted) device whose class matches the StorageClass.
+    candidates = [
+        d for d in devices
+        if d.get("class_name") == sc_class
+        and d.get("mountpoint") == DATA_MOUNTPOINT
+    ]
+    if not candidates:
+        return  # no matching drive on this node — handled by another node, or wait
+    device = candidates[0]
+
     target = os.path.join(HOST_DATA, pvc.metadata.name)
     os.makedirs(target, exist_ok=True)
 
-    pv = _build_pv(pvc, sc, sc_uuid, NODE_NAME,
-                   device.get("serial"), device.get("model_name"))
+    pv = _build_pv(pvc, sc, sc_class, NODE_NAME, device.get("serial"))
     try:
         v1.create_persistent_volume(pv)
     except ApiException as e:
@@ -566,13 +598,13 @@ def provision_pvc(v1, storage_v1, pvc, fs_uuid_to_device):
             return
         raise
 
-    log.info("provisioned PV %s for PVC %s/%s on node %s (device serial %s)",
+    log.info("provisioned PV %s for PVC %s/%s on %s (class=%s, device serial=%s)",
              pv.metadata.name, pvc.metadata.namespace, pvc.metadata.name,
-             NODE_NAME, device.get("serial"))
+             NODE_NAME, sc_class, device.get("serial"))
     emit_event(
         v1, "Provisioned",
         f"PV {pv.metadata.name} provisioned on {NODE_NAME} "
-        f"(device serial {device.get('serial')}, model {device.get('model_name')})",
+        f"(class {sc_class}, device serial {device.get('serial')})",
         regarding=client.V1ObjectReference(
             api_version="v1", kind="PersistentVolumeClaim",
             namespace=pvc.metadata.namespace, name=pvc.metadata.name,
@@ -751,33 +783,34 @@ def migrate_device(v1, serial, old_node, new_node):
 # Reconcile
 # --------------------------------------------------------------------------- #
 
-def reconcile(v1, storage_v1, co, models):
+def reconcile(v1, storage_v1, co):
     devices = discover_devices()
+    classes = load_classes(co)
 
-    # Tag each device with its matched model.
+    # Tag each device with the class that matched (if any).
     for d in devices:
-        m = match_model(d, models)
-        d["model_name"] = m["name"] if m else None
-        d["_model"] = m
-        if not m:
+        c = device_class_for(d, classes)
+        d["class_name"] = c["name"] if c else None
+        d["_class"] = c
+        if not c:
             serial = d.get("serial") or d["device"]
             if serial not in _logged_unmatched:
-                log.info("ignored device %s (no model matched): vendor=%r model=%r serial=%s fs=%s",
+                log.info("ignored device %s (no class matched): vendor=%r model=%r serial=%s fs=%s",
                          d["device"], d.get("vendor"), d.get("model"),
                          d.get("serial"), d.get("fs_uuid"))
                 _logged_unmatched.add(serial)
 
     # Format + mount matching devices before doing anything else. Sorted by
     # device path so the first matching drive wins /data deterministically.
-    for d in sorted([x for x in devices if x.get("_model")],
+    for d in sorted([x for x in devices if x.get("_class")],
                     key=lambda x: x["device"]):
         try:
-            ensure_ready(d, d["_model"])
+            ensure_ready(d, d["_class"])
         except Exception:
             log.exception("ensure_ready failed for %s", d["device"])
 
-    fs_uuids = {d["fs_uuid"] for d in devices if d.get("fs_uuid")}
-    update_node_labels(v1, fs_uuids)
+    local_class_names = {d["class_name"] for d in devices if d.get("class_name")}
+    update_node_labels(v1, local_class_names)
 
     # Registry update + insertion / initialization / migration detection.
     registry = registry_load(co)
@@ -789,7 +822,7 @@ def reconcile(v1, storage_v1, co, models):
         if not serial:
             continue  # can't track devices without a serial
         local_serials.add(serial)
-        m = d["_model"]
+        c = d["_class"]
         existing = registry.get(serial)
 
         # Migration: this serial was last seen on a different node.
@@ -799,7 +832,7 @@ def reconcile(v1, storage_v1, co, models):
                         serial, old_node, NODE_NAME)
             emit_event(
                 v1, "DeviceMigrated",
-                f"Device serial {serial} (model {existing.get('model')}) "
+                f"Device serial {serial} (class {existing.get('class')}) "
                 f"moved from {old_node} to {NODE_NAME}",
                 type_="Warning",
             )
@@ -807,9 +840,9 @@ def reconcile(v1, storage_v1, co, models):
 
         entry = {
             "serial": serial,
-            "model": m["name"] if m else None,
+            "class": c["name"] if c else None,
             "vendor": d.get("vendor"),
-            "modelString": d.get("model"),
+            "model": d.get("model"),
             "fsUUID": d.get("fs_uuid"),
             "currentNode": NODE_NAME,
             "lastSeen": now,
@@ -819,26 +852,26 @@ def reconcile(v1, storage_v1, co, models):
         }
 
         if not existing:
-            log.info("device inserted: model=%s serial=%s fs=%s vendor=%r product=%r node=%s",
-                     entry["model"], serial, entry["fsUUID"],
+            log.info("device inserted: class=%s serial=%s fs=%s vendor=%r product=%r node=%s",
+                     entry["class"], serial, entry["fsUUID"],
                      d.get("vendor"), d.get("model"), NODE_NAME)
             emit_event(
                 v1, "DeviceInserted",
-                f"Device {entry['model'] or 'unrecognized'} (serial {serial}) "
+                f"Device (class {entry['class'] or 'unmatched'}, serial {serial}) "
                 f"inserted on {NODE_NAME}",
             )
 
         registry_upsert(co, serial, entry)
 
-        # Initialization: only if a model matched, device is mounted, and it's blank.
-        if m and d.get("mountpoint") and is_blank(d["mountpoint"]):
-            log.info("initializing device model=%s serial=%s at %s",
-                     m["name"], serial, d["mountpoint"])
+        # Initialization: only if a class matched, device is mounted, and it's blank.
+        if c and d.get("mountpoint") and is_blank(d["mountpoint"]):
+            log.info("initializing device class=%s serial=%s at %s",
+                     c["name"], serial, d["mountpoint"])
             try:
-                initialize_device(d["mountpoint"], m, serial)
+                initialize_device(d["mountpoint"], c, serial)
                 emit_event(
                     v1, "DeviceInitialized",
-                    f"Initialized device {m['name']} (serial {serial}) "
+                    f"Initialized device (class {c['name']}, serial {serial}) "
                     f"at {d['mountpoint']} on {NODE_NAME}",
                 )
             except OSError:
@@ -849,11 +882,11 @@ def reconcile(v1, storage_v1, co, models):
         if (entry.get("currentNode") == NODE_NAME
                 and entry.get("phase") != "Removed"
                 and serial not in local_serials):
-            log.info("device removed: model=%s serial=%s (was on %s)",
-                     entry.get("model"), serial, NODE_NAME)
+            log.info("device removed: class=%s serial=%s (was on %s)",
+                     entry.get("class"), serial, NODE_NAME)
             emit_event(
                 v1, "DeviceRemoved",
-                f"Device serial {serial} (model {entry.get('model')}) "
+                f"Device serial {serial} (class {entry.get('class')}) "
                 f"removed from {NODE_NAME}",
             )
             entry["phase"] = "Removed"
@@ -862,12 +895,11 @@ def reconcile(v1, storage_v1, co, models):
             registry_upsert(co, serial, entry)
 
     # PVC provisioning + PV cleanup.
-    fs_uuid_to_device = {d["fs_uuid"]: d for d in devices if d.get("fs_uuid")}
     for pvc in v1.list_persistent_volume_claim_for_all_namespaces().items:
         if not _matches_our_provisioner(pvc.metadata.annotations or {}):
             continue
         try:
-            provision_pvc(v1, storage_v1, pvc, fs_uuid_to_device)
+            provision_pvc(v1, storage_v1, pvc, devices)
         except Exception:
             log.exception("provisioning %s/%s failed",
                           pvc.metadata.namespace, pvc.metadata.name)
@@ -913,15 +945,13 @@ def main():
     v1 = client.CoreV1Api()
     storage_v1 = client.StorageV1Api()
     co = client.CustomObjectsApi()
-    models = load_models()
-    log.info("usb-storage provisioner starting on node %s with %d models",
-             NODE_NAME, len(models))
+    log.info("usb-storage provisioner starting on node %s", NODE_NAME)
     start_health_server()
 
     global _last_reconcile_ok
     while True:
         try:
-            reconcile(v1, storage_v1, co, models)
+            reconcile(v1, storage_v1, co)
             _last_reconcile_ok = time.time()
         except Exception:
             log.exception("reconcile error")

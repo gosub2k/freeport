@@ -20,7 +20,7 @@ set -euo pipefail
 
 NS="${NAMESPACE:-dimsum}"
 PROV_NS="${PROVISIONER_NAMESPACE:-dimsum}"
-SC="${STORAGE_CLASS:-usb-local-a}"
+SC="${STORAGE_CLASS:-usb-local-cruzer}"
 TIMEOUT="${TIMEOUT:-120}"
 
 stamp=$(date +%s)
@@ -52,13 +52,15 @@ kubectl get sc "$SC" >/dev/null    || fail "StorageClass $SC not found"
 kubectl -n "$PROV_NS" get ds usb-storage-provisioner >/dev/null \
   || fail "DaemonSet usb-storage-provisioner not in namespace $PROV_NS"
 
-uuid=$(kubectl get sc "$SC" -o jsonpath='{.parameters.uuid}')
-[ -n "$uuid" ] || fail "StorageClass $SC has no 'uuid' parameter"
+device_class=$(kubectl get sc "$SC" -o jsonpath='{.parameters.deviceClass}')
+[ -n "$device_class" ] || fail "StorageClass $SC has no 'deviceClass' parameter"
+kubectl get usbdeviceclass "$device_class" >/dev/null \
+  || fail "USBDeviceClass $device_class referenced by $SC does not exist"
 
-label="usb-storage.frankencluster.local/uuid-$uuid"
+label="usb-storage.frankencluster.local/class-$device_class"
 nodes=$(kubectl get nodes -l "$label=true" -o jsonpath='{.items[*].metadata.name}')
-[ -n "$nodes" ] || fail "no nodes labelled $label — is the USB plugged in and visible in /dev/disk/by-uuid?"
-green "  ready: SC=$SC, UUID=$uuid, eligible nodes: $nodes"
+[ -n "$nodes" ] || fail "no nodes labelled $label — is a matching USB plugged into any node?"
+green "  ready: SC=$SC, class=$device_class, eligible nodes: $nodes"
 
 blue "[2/7] create PVC + writer pod"
 kubectl apply -f - <<EOF

@@ -1,20 +1,20 @@
-# One StorageClass per USB drive. Convention from the cluster CLAUDE.md is
-# `usb-local-<id>`. The `uuid` parameter must equal the filesystem UUID of the
-# drive (find it with `blkid` on the node).
+# A StorageClass references a USBDeviceClass via parameters.deviceClass.
+# A single StorageClass can yield PVs on any drive that matches the class,
+# on any node where one is plugged in.
 #
-# allowedTopologies makes the scheduler only place pods using this class on
-# nodes labelled with the matching UUID. The DaemonSet adds those labels
-# automatically when it sees the device in /dev/disk/by-uuid.
+# allowedTopologies makes the scheduler only place pods on nodes labelled
+# with this class; the DaemonSet adds that label automatically when it sees
+# a matching device.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: usb-local-a
+  name: usb-local-cruzer
 provisioner: frankencluster.local/usb-storage
 parameters:
-  uuid: "REPLACE-WITH-FILESYSTEM-UUID"
+  deviceClass: "cruzer-blade"   # must equal a USBDeviceClass name
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
 allowedTopologies:
   - matchLabelExpressions:
-      - key: usb-storage.frankencluster.local/uuid-REPLACE-WITH-FILESYSTEM-UUID
+      - key: usb-storage.frankencluster.local/class-cruzer-blade
         values: ["true"]
