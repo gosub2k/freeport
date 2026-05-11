@@ -1,0 +1,48 @@
+# Device models the provisioner recognises. The provisioner is "instantiated"
+# with this list: only devices matching one of these models get registered,
+# initialised, and tracked for migration.
+#
+# match: dict of fields the OS exposes when a USB is inserted.
+#        Supported keys (see /sys/block/<dev>/...):
+#          vendor   — /sys/block/<dev>/device/vendor
+#          model    — /sys/block/<dev>/device/model
+#          serial   — /sys/block/<dev>/serial  (or device/serial)
+#          fs_uuid  — filesystem UUID (from /dev/disk/by-uuid)
+#        All entered values must match exactly.
+#
+# initialize.directories: subdirs to mkdir under the device's mountpoint
+#        when the filesystem is blank. An init marker (.usb-storage-init)
+#        is written after the first successful initialise so this only
+#        runs once per drive.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: usb-storage-models
+  namespace: dimsum
+data:
+  models.yaml: |
+    # initialize:
+    #   autoFormat: true        # if no FS is detected, run mkfs.ext4 -F. Default false.
+    #   fsLabel: "<label>"      # label passed to mkfs (only used when formatting)
+    #   directories: [...]      # subdirs created when the FS is empty
+    models:
+      - name: frankencluster-usb-v1
+        match:
+          vendor: "SanDisk"
+          model: "Cruzer Blade"
+        initialize:
+          autoFormat: true
+          fsLabel: "frankenstore"
+          directories:
+            - projects
+            - kv
+            - files
+      - name: external-ssd-t7
+        match:
+          vendor: "Samsung"
+          model: "Portable SSD T7"
+        initialize:
+          autoFormat: true
+          fsLabel: "ssd-t7"
+          directories:
+            - projects

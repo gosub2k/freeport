@@ -1,0 +1,81 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: usbdevices.frankencluster.local
+spec:
+  group: frankencluster.local
+  scope: Cluster
+  names:
+    plural: usbdevices
+    singular: usbdevice
+    kind: USBDevice
+    shortNames:
+      - usbdev
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Model
+          type: string
+          jsonPath: .spec.model
+        - name: Node
+          type: string
+          jsonPath: .status.currentNode
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: FS-UUID
+          type: string
+          jsonPath: .status.fsUUID
+          priority: 1
+        - name: Last-Seen
+          type: date
+          jsonPath: .status.lastSeen
+        - name: Serial
+          type: string
+          jsonPath: .spec.serial
+          priority: 1
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["serial"]
+              properties:
+                serial:
+                  type: string
+                  description: USB device serial number (canonical identity).
+                model:
+                  type: string
+                  description: Name of the matched usb-storage model.
+                vendor:
+                  type: string
+                  description: Kernel-reported vendor string.
+                modelString:
+                  type: string
+                  description: Kernel-reported product string.
+                firstSeen:
+                  type: string
+                  format: date-time
+            status:
+              type: object
+              properties:
+                fsUUID:
+                  type: string
+                  description: Filesystem UUID (may change if the device is reformatted).
+                currentNode:
+                  type: string
+                  description: Node that currently holds the device, or last held it.
+                lastSeen:
+                  type: string
+                  format: date-time
+                phase:
+                  type: string
+                  enum: ["Present", "Removed"]
+                mountpoint:
+                  type: string
