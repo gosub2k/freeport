@@ -7,24 +7,26 @@ plugged directly into nodes, no NFS, no networked storage.
 
 The controller is a DaemonSet — one pod per node. Each pod:
 
-* Reads every `USBDeviceClass` CR (cluster-scoped). A class defines the
-  match criteria — by product (`vendor` + `model`) or by serial allowlist —
-  plus optional initialisation rules.
+* Reads every `StorageClass` whose provisioner is ours. Each one's
+  `parameters` carries the match criteria — `vendor` / `model` (fnmatch
+  globs) and/or `serials` (comma-separated allowlist) — and the
+  formatting policy (`autoFormat`, `fsLabel`).
 * Detects USB block devices on its node by reading `/host/sys/block` and
   `/host/proc/1/mountinfo` (no external binaries needed). Matches each
-  device against the registered classes.
-* Records every recognised device in an **etcd-backed registry**: one
-  `USBDevice` CR (`frankencluster.local/v1`) per serial, with the
-  device's identity in `.spec` and live state (`currentNode`, `lastSeen`,
-  `phase`, `fsUUID`, `mountpoint`) on the `.status` subresource. Inspect
-  with `kubectl get usbdevice`.
+  device against every StorageClass.
+* Records every USB drive seen in an **etcd-backed registry**: one
+  `USBDevice` CR (`frankencluster.local/v1`) per serial number, with the
+  device's identity (`vendor`, `model`, `serial`, `firstSeen`) in `.spec`
+  and live state (`currentNode`, `lastSeen`, `phase`, `fsUUID`,
+  `mountpoint`) on the `.status` subresource. `kubectl get usbdevice` to
+  inspect.
 * **Initialises** a blank filesystem with the directory structure the
   model declares, and drops a `.usb-storage-init` marker so it only runs
   once per drive.
-* Labels the node with `usb-storage.frankencluster.local/class-<className>=true`
-  for every class that has a matching device locally. The scheduler uses
-  these labels (via `allowedTopologies` on the StorageClass) to place pods
-  on nodes that can satisfy the volume.
+* Labels the node with `usb-storage.frankencluster.local/class-<scname>=true`
+  for every StorageClass that has a matching ready device locally. The
+  scheduler uses these labels (via `allowedTopologies` on the StorageClass)
+  to place pods on nodes that can satisfy the volume.
 * Provisions Kubernetes `local` PVs (path `/data/<pvc-name>`,
   `nodeAffinity` pinned to this node) when a PVC with the matching
   StorageClass + selectedNode arrives.
@@ -32,16 +34,20 @@ The controller is a DaemonSet — one pod per node. Each pod:
   recreated with new nodeAffinity, and pods using the affected PVCs are
   evicted so their controllers reschedule them onto the new node.
 * Emits Kubernetes Events for the major lifecycle moments:
-  `Provisioned`, `DeviceInserted`, `DeviceInitialized`, `DeviceRemoved`,
-  `DeviceMigrated`, `PVMigrated`.
+  `Provisioned`, `DeviceInserted`, `DeviceRemoved`, `DeviceMigrated`,
+  `PVMigrated`.
 * Exposes `/health` on port 8080.
 
 ## What it is not
 
 Not a full CSI driver. This is a small external provisioner that emits
-Kubernetes' built-in `local` PV type. ~600 lines of Python instead of a
+Kubernetes' built-in `local` PV type. ~750 lines of Python instead of a
 CSI gRPC server. If you need block volumes, snapshots, expansion, or
 multi-attach, swap this out.
+
+It is also **directory-agnostic**: the provisioner creates `/data/<pvc-name>`
+and points the PV at it; anything you want inside that directory is your
+pod's responsibility.
 
 ## Layout
 
@@ -52,11 +58,9 @@ requirements.txt
 test.sh                         # end-to-end smoke test (kubectl-based)
 deploy/
   crd-usbdevice.yaml            # USBDevice CRD (per-drive runtime registry)
-  crd-usbdeviceclass.yaml       # USBDeviceClass CRD (user-facing match policy)
   rbac.yaml                     # Namespace + SA + ClusterRole/Binding + Role/Binding
   daemonset.yaml                # DaemonSet + headless Service
-  usbdeviceclass-example.yaml   # two example classes
-  storageclass-example.yaml     # StorageClass that references a class
+  storageclass-example.yaml     # two example StorageClasses (glob + serial)
 ```
 
 ## Prerequisites on each node
@@ -64,11 +68,10 @@ deploy/
 None. Just plug the USB in. The daemon:
 
 1. detects the device via `/sys/block`,
-2. matches it against your `USBDeviceClass` CRs,
-3. if matched and unformatted, runs `mkfs.ext4` on it (set `initialize.autoFormat: true` on the class),
+2. matches it against every `StorageClass` whose provisioner is ours,
+3. if matched and unformatted, runs `mkfs.ext4` on it (set `parameters.autoFormat: "true"` on the StorageClass),
 4. mounts it at `/data` in the host's mount namespace,
-5. creates the class's declared subdirectories,
-6. registers it as a `USBDevice` CR in the cluster.
+5. registers it as a `USBDevice` CR in the cluster.
 
 All host operations run via `nsenter --target 1`, so the container needs
 `privileged: true` + `hostPID: true` (already set in `deploy/daemonset.yaml`).
@@ -91,10 +94,9 @@ and `mount` binaries directly.
 2. Edit `deploy/daemonset.yaml` and replace `REPLACE_ME/usb-storage-provisioner:latest`
    with your image.
 
-3. Edit `deploy/usbdeviceclass-example.yaml` (or create your own) so the
-   `match:` blocks describe the actual USBs you want the controller to
-   accept. `vendor` and `model` come from
-   `/sys/block/<dev>/device/{vendor,model}` — easiest way to check them is
+3. Edit `deploy/storageclass-example.yaml` so each StorageClass's
+   `parameters` block describes the USBs you want it to accept. `vendor`
+   and `model` come from `/sys/block/<dev>/device/{vendor,model}` —
    `cat /sys/block/sdX/device/{vendor,model}` on a node.
 
 4. Apply everything:
@@ -106,97 +108,69 @@ and `mount` binaries directly.
    ```bash
    kubectl -n dimsum get ds usb-storage-provisioner
    kubectl -n dimsum logs -l app=usb-storage-provisioner --tail=40
-   kubectl get usbdeviceclass            # the classes you configured
+   kubectl get sc                        # the storage classes you defined
    kubectl get usbdevice                 # one CR per physical drive seen
-   kubectl get usbdevice -o wide         # adds Product / FS-UUID / Serial
+   kubectl get usbdevice -o wide         # adds FS-UUID + Serial columns
    kubectl get nodes --show-labels | grep usb-storage
    kubectl -n dimsum get events
    ```
 
-## Device classes
+## StorageClass parameters
 
-The controller's behaviour is driven by `USBDeviceClass` CRs. Match by
-product or by serial allowlist; both can be set, all set fields must
-pass. UUIDs never appear in user config.
+Match criteria live directly on the StorageClass. UUIDs never appear.
 
-```yaml
-# match by product — any drive of this make/model qualifies
-apiVersion: frankencluster.local/v1
-kind: USBDeviceClass
-metadata:
-  name: cruzer-blade
-spec:
-  match:
-    vendor: "SanDisk"
-    model: "Cruzer Blade"
-  initialize:
-    autoFormat: true
-    fsLabel: "frankenstore"
-    directories: [projects, kv, files]
----
-# match by serial — explicit allowlist
-apiVersion: frankencluster.local/v1
-kind: USBDeviceClass
-metadata:
-  name: backup-set
-spec:
-  match:
-    serials:
-      - "AA00112233445566"
-      - "BB00778899AABBCC"
-  initialize:
-    directories: [backups]
-```
+| Parameter   | Type            | Meaning |
+|-------------|-----------------|---------|
+| `vendor`    | fnmatch glob    | Matches `/sys/block/<dev>/device/vendor` (e.g. `"SanDisk*"`). |
+| `model`     | fnmatch glob    | Matches `/sys/block/<dev>/device/model` (e.g. `"Cruzer*"`). |
+| `serials`   | comma-separated | Allowlist of exact serials. The drive's serial must be in it. |
+| `autoFormat`| `"true"`/`"false"` | If true and the device has no filesystem, run `mkfs.ext4`. Default false. |
+| `fsLabel`   | string          | Filesystem label set when `autoFormat` fires. |
 
-Behaviour:
-* On first match for an unseen serial, the controller creates a
-  `USBDevice` CR for the drive and emits a `DeviceInserted` event.
-* If the matched drive is unformatted and the class has
-  `initialize.autoFormat: true`, the controller runs `mkfs.ext4` on it.
-* Once mounted at `/data` and blank (no init marker, no entries other
-  than `lost+found`), the controller creates each listed subdirectory
-  and writes `.usb-storage-init` — this fires `DeviceInitialized`.
-
-Add or change classes with `kubectl apply -f`. The daemons re-read the
-class list at the start of each reconcile.
-
-## StorageClass mapping
-
-A `StorageClass` references a class by name. One StorageClass can yield
-PVs from any drive matching the class, on any node where one is plugged in:
+At least one of `vendor` / `model` / `serials` must be set — a
+StorageClass with no match criteria refuses to match anything (no
+implicit match-everything).
 
 ```yaml
 parameters:
-  deviceClass: "cruzer-blade"
+  vendor: "SanDisk*"
+  model: "Cruzer*"
+  autoFormat: "true"
+  fsLabel: "frankenstore"
 allowedTopologies:
   - matchLabelExpressions:
-      - key: usb-storage.frankencluster.local/class-cruzer-blade
+      - key: usb-storage.frankencluster.local/class-usb-sandisk   # = SC name
         values: ["true"]
 ```
 
-A class can be referenced by multiple StorageClasses (e.g. one with
-`reclaimPolicy: Retain` and one with `Delete`), and a class can match
-many physical drives — the relationship is one-class-to-many-drives.
+A drive can match more than one StorageClass simultaneously (e.g. a
+`Retain` and a `Delete` variant pointing at the same hardware). When a
+PVC arrives, only the StorageClass it actually names is used to pick
+which drive to bind. The first matching SC's `autoFormat` / `fsLabel`
+drives the one-shot format step.
+
+A single StorageClass can produce PVs across many physical drives on
+many nodes — one-class-to-many-drives.
 
 ## Adding a new USB drive
 
-1. **Make sure a class matches it.** If the drive is the same make/model as
-   one you've already accepted, you're done — there's nothing to add. If
-   it's new, either:
+1. **Make sure a StorageClass matches it.** If the drive is the same
+   make/model as one you've already accepted, you're done. If it's new,
+   either:
    * pick any node, check `cat /sys/block/sdX/device/{vendor,model}` and
-     add a class with that `vendor` + `model`, or
-   * add the drive's serial to an existing class's `match.serials` list.
-   Then `kubectl apply -f` the class.
+     create (or widen the glob on) a StorageClass with that
+     `parameters.vendor` + `parameters.model`, or
+   * add the drive's serial to a StorageClass's `parameters.serials` list.
+   Then `kubectl apply -f` the StorageClass.
 2. **Plug it in.** Within `POLL_INTERVAL` (10s) the daemon on that node
    should log `FORMAT /dev/sdX` (if unformatted) and `MOUNT /dev/sdX at
-   /data`, then emit `DeviceInserted` + `DeviceInitialized`:
+   /data`, then emit `DeviceInserted`:
    ```bash
    kubectl -n dimsum get events --sort-by=.lastTimestamp | tail -10
    kubectl get usbdevice
    ```
-3. **Use it.** Any PVC with `storageClassName` pointing at a StorageClass
-   whose `parameters.deviceClass` matches the class will now be eligible
-   for provisioning on this node.
+3. **Use it.** Any PVC pointing at a matching StorageClass is now
+   provisionable.
 
 ## Device migration
 
@@ -265,9 +239,9 @@ STORAGE_CLASS=usb-local-c ./test.sh
   `kubectl get usbdevice`.
 * `selected-node` set but no PV — check the daemon logs on that node.
 * `Device inserted` event missing but drive is plugged in — the device
-  probably doesn't match any class. Check
-  `cat /sys/block/sdX/device/{vendor,model}` and adjust your
-  USBDeviceClass.
+  probably doesn't match any StorageClass. Check
+  `cat /sys/block/sdX/device/{vendor,model}` and widen the glob or
+  serial allowlist on the StorageClass.
 * `Migration recreated PV …` followed by a stuck pod — the PVC re-bound
   but the pod's controller hasn't rescheduled. Check it has a controller
   (StatefulSet / Deployment), not a bare Pod.

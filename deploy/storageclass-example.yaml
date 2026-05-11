@@ -1,20 +1,41 @@
-# A StorageClass references a USBDeviceClass via parameters.deviceClass.
-# A single StorageClass can yield PVs on any drive that matches the class,
-# on any node where one is plugged in.
+# Match criteria live directly in the StorageClass parameters. Set any
+# combination of vendor / model / serials — every set field must match the
+# device's kernel-reported value. vendor and model accept shell-style globs
+# (fnmatch: *, ?, [seq]). serials is a comma-separated allowlist.
 #
-# allowedTopologies makes the scheduler only place pods on nodes labelled
-# with this class; the DaemonSet adds that label automatically when it sees
-# a matching device.
+# Nodes that hold a matching device are auto-labelled
+#   usb-storage.frankencluster.local/class-<storageclass-name>=true
+# which is what allowedTopologies keys on below.
+---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: usb-local-cruzer
+  name: usb-sandisk
 provisioner: frankencluster.local/usb-storage
 parameters:
-  deviceClass: "cruzer-blade"   # must equal a USBDeviceClass name
+  vendor: "SanDisk*"
+  model: "Cruzer*"
+  autoFormat: "true"
+  fsLabel: "frankenstore"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
 allowedTopologies:
   - matchLabelExpressions:
-      - key: usb-storage.frankencluster.local/class-cruzer-blade
+      - key: usb-storage.frankencluster.local/class-usb-sandisk
+        values: ["true"]
+---
+# Serial allowlist — explicit set of physical drives, no globbing.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: usb-backup-set
+provisioner: frankencluster.local/usb-storage
+parameters:
+  serials: "AA00112233445566,BB00778899AABBCC"
+  autoFormat: "false"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: usb-storage.frankencluster.local/class-usb-backup-set
         values: ["true"]

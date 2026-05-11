@@ -3,30 +3,33 @@
 
 DaemonSet pod per node. Each pod:
 
-  - Loads a list of *device models* (kernel-reported fields the controller
-    knows about) from a mounted ConfigMap.
-  - Detects USB block devices on its node by reading /host/sys/block and
-    /host/proc/1/mountinfo. Matches each device against the registered
-    models by vendor/model/serial/fs_uuid.
-  - Records every recognised device in an etcd-backed ConfigMap registry,
-    keyed by serial. Tracks first-seen / last-seen / current-node.
-  - Initialises a blank (or minimally-populated) filesystem with the
-    directory structure declared by its model, and drops an init marker.
-  - Labels the node with `usb-storage.frankencluster.local/uuid-<UUID>=true`
-    so the scheduler can place pods on nodes that have the right drive.
-  - Provisions Kubernetes `local` PVs for PVCs whose StorageClass UUID is
-    present on this node (WaitForFirstConsumer flow).
-  - **Migrates** PVs when a device moves to a different node: the PV is
+  - Detects USB block devices by reading /host/sys/block and
+    /host/proc/1/mountinfo (no external binaries needed).
+  - Reads every StorageClass whose provisioner is ours and matches each
+    device against its parameters: vendor (fnmatch glob), model (fnmatch
+    glob), serials (comma-separated allowlist). All set fields must pass.
+  - For a matched, unformatted device whose StorageClass has
+    autoFormat=true, runs mkfs.ext4 via nsenter on the host. Then mounts
+    the device at /data, also via nsenter.
+  - Records every drive in a USBDevice CR (cluster-scoped CRD) keyed by
+    its serial number. Tracks first-seen / last-seen / current-node and
+    filesystem UUID on the .status subresource.
+  - Labels the node with usb-storage.frankencluster.local/class-<scname>
+    for every StorageClass that has a ready local device. The scheduler
+    uses these labels via the StorageClass's allowedTopologies.
+  - Provisions Kubernetes `local` PVs (path /data/<pvc-name>) when a PVC
+    references one of our StorageClasses and a matching device is locally
+    mounted (WaitForFirstConsumer flow).
+  - **Migrates** PVs when a drive moves to a different node: the PV is
     deleted and recreated with the same name + claimRef but new
     nodeAffinity, and pods using the affected PVCs are evicted so their
     controllers reschedule them.
   - Emits Kubernetes Events for the major lifecycle moments
-    (Provisioned, DeviceInserted, DeviceInitialized, DeviceRemoved,
-    DeviceMigrated, PVMigrated).
+    (Provisioned, DeviceInserted, DeviceRemoved, DeviceMigrated, PVMigrated).
   - Exposes /health on port 8080.
 """
 
-import json
+import fnmatch
 import logging
 import os
 import re
@@ -61,13 +64,10 @@ HOST_BY_UUID = "/host/dev/disk/by-uuid"
 HOST_SYS_BLOCK = "/host/sys/block"
 HOST_MOUNTINFO = "/host/proc/1/mountinfo"
 
-INIT_MARKER = ".usb-storage-init"
-
 USBDEVICE_GROUP = "frankencluster.local"
 USBDEVICE_VERSION = "v1"
 USBDEVICE_PLURAL = "usbdevices"
 USBDEVICE_KIND = "USBDevice"
-USBDEVICECLASS_PLURAL = "usbdeviceclasses"
 
 DATA_MOUNTPOINT = "/data"  # canonical mountpoint on the host
 NSENTER = ["nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"]
@@ -126,26 +126,34 @@ def _data_mount_source():
     return None
 
 
-def ensure_ready(device, model):
+def _parse_bool(s, default=False):
+    if s is None:
+        return default
+    return str(s).strip().lower() in ("true", "1", "yes", "on")
+
+
+def ensure_ready(device, sc):
     """Idempotently format (if no FS) and mount (if not mounted) the device.
 
-    Updates `device` in place with the freshly discovered fs_uuid / mountpoint.
+    Reads autoFormat / fsLabel from the StorageClass's parameters. Updates
+    `device` in place with the freshly discovered fs_uuid / mountpoint.
     Returns True if the device is now mounted at /data, False otherwise.
     """
     if device.get("mountpoint") == DATA_MOUNTPOINT:
         return True  # already where we want it
 
-    init_spec = model.get("initialize", {}) or {}
+    params = sc.parameters or {}
+    sc_name = sc.metadata.name
 
     # Step 1: format if no filesystem is detected on the block device.
     if not device.get("fs_uuid"):
-        if not init_spec.get("autoFormat", False):
-            log.warning("device %s has no filesystem and model %s has autoFormat=false; skipping",
-                        device["device"], model["name"])
+        if not _parse_bool(params.get("autoFormat"), default=False):
+            log.warning("device %s has no filesystem and StorageClass %s has autoFormat!=true; skipping",
+                        device["device"], sc_name)
             return False
-        log.warning("FORMAT %s (model=%s, no existing filesystem)",
-                    device["device"], model["name"])
-        host_format(device["device"], fs_label=init_spec.get("fsLabel"))
+        log.warning("FORMAT %s (StorageClass=%s, no existing filesystem)",
+                    device["device"], sc_name)
+        host_format(device["device"], fs_label=params.get("fsLabel"))
         # Re-read UUID — udev should have populated /dev/disk/by-uuid by now.
         for _ in range(10):
             dev_to_uuid = {v: k for k, v in _uuid_to_device().items()}
@@ -268,53 +276,45 @@ def discover_devices():
 # Device models
 # --------------------------------------------------------------------------- #
 
-def load_classes(co):
-    """Read every USBDeviceClass CR and normalize to a flat list of dicts."""
-    try:
-        lst = co.list_cluster_custom_object(
-            USBDEVICE_GROUP, USBDEVICE_VERSION, USBDEVICECLASS_PLURAL,
-        )
-    except ApiException as e:
-        if e.status == 404:
-            log.warning("USBDeviceClass CRD not installed; no classes available")
-            return []
-        raise
-    classes = []
-    for item in lst.get("items", []):
-        spec = item.get("spec") or {}
-        classes.append({
-            "name": item["metadata"]["name"],
-            "match": spec.get("match") or {},
-            "initialize": spec.get("initialize") or {},
-        })
-    return classes
+def list_our_storageclasses(storage_v1):
+    """Every StorageClass on the cluster whose provisioner is ours."""
+    return [
+        sc for sc in storage_v1.list_storage_class().items
+        if sc.provisioner == PROVISIONER
+    ]
 
 
-def device_class_for(device, classes):
-    """Return the first USBDeviceClass whose match criteria fit `device`.
+def _parse_serials(s):
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
 
-    Match rules:
-      - serials (list): the device's serial must be in the list.
-      - vendor: device's vendor must equal exactly.
-      - model: device's model must equal exactly.
-    Every field that's set must pass; an empty match block never matches.
+
+def device_matches_sc(device, sc):
+    """True if `device` satisfies every match field set in `sc.parameters`.
+
+    Supported parameters:
+      vendor   — fnmatch glob against /sys/.../device/vendor
+      model    — fnmatch glob against /sys/.../device/model
+      serials  — comma-separated allowlist; the device serial must be in it
+    At least one of these must be set; otherwise the StorageClass matches
+    nothing (refuse implicit match-everything).
     """
-    for c in classes:
-        m = c["match"]
-        if not m:
-            continue
-        if "serials" in m:
-            if device.get("serial") not in (m["serials"] or []):
-                continue
-        if "vendor" in m and device.get("vendor", "") != m["vendor"]:
-            continue
-        if "model" in m and device.get("model", "") != m["model"]:
-            continue
-        # All non-empty conditions matched. Reject pure-empty match blocks.
-        if not any(k in m for k in ("serials", "vendor", "model")):
-            continue
-        return c
-    return None
+    p = sc.parameters or {}
+    has_criteria = False
+    if "vendor" in p:
+        if not fnmatch.fnmatchcase(device.get("vendor", ""), p["vendor"]):
+            return False
+        has_criteria = True
+    if "model" in p:
+        if not fnmatch.fnmatchcase(device.get("model", ""), p["model"]):
+            return False
+        has_criteria = True
+    if "serials" in p:
+        if device.get("serial") not in _parse_serials(p["serials"]):
+            return False
+        has_criteria = True
+    return has_criteria
 
 
 # --------------------------------------------------------------------------- #
@@ -322,10 +322,10 @@ def device_class_for(device, classes):
 # --------------------------------------------------------------------------- #
 
 def _serial_to_name(serial):
-    """Sanitize a USB serial into a valid Kubernetes resource name."""
+    """Sanitize a USB serial into a valid Kubernetes resource name (RFC 1123)."""
     name = re.sub(r"[^a-z0-9.-]", "-", serial.lower())
     name = re.sub(r"-+", "-", name).strip("-.")
-    return (name[:253] or "unknown-serial")
+    return name[:253]
 
 
 def registry_load(co):
@@ -347,7 +347,6 @@ def registry_load(co):
             continue
         entries[serial] = {
             "serial": serial,
-            "class": spec.get("class"),
             "vendor": spec.get("vendor"),
             "model": spec.get("model"),
             "firstSeen": spec.get("firstSeen"),
@@ -369,7 +368,6 @@ def registry_upsert(co, serial, entry):
         "metadata": {"name": name},
         "spec": {
             "serial": serial,
-            "class": entry.get("class"),
             "vendor": entry.get("vendor"),
             "model": entry.get("model"),
             "firstSeen": entry.get("firstSeen"),
@@ -428,44 +426,6 @@ def emit_event(v1, reason, message, regarding=None, type_="Normal"):
         v1.create_namespaced_event(PROVISIONER_NS, event)
     except ApiException:
         log.exception("failed to emit event %s", reason)
-
-
-# --------------------------------------------------------------------------- #
-# Initialization
-# --------------------------------------------------------------------------- #
-
-def _host_view(mountpoint):
-    """Convert a host mountpoint (e.g. /data) to its in-container path."""
-    if not mountpoint:
-        return None
-    return os.path.join("/host", mountpoint.lstrip("/"))
-
-
-def is_blank(mountpoint):
-    """A filesystem is 'blank' if it has no init marker and no payload."""
-    path = _host_view(mountpoint)
-    if not path or not os.path.isdir(path):
-        return False
-    if os.path.exists(os.path.join(path, INIT_MARKER)):
-        return False
-    entries = [e for e in os.listdir(path) if e != "lost+found"]
-    return len(entries) == 0
-
-
-def initialize_device(mountpoint, model, serial):
-    path = _host_view(mountpoint)
-    if not path:
-        return
-    init_spec = model.get("initialize", {}) or {}
-    for d in init_spec.get("directories", []) or []:
-        os.makedirs(os.path.join(path, d), exist_ok=True)
-    with open(os.path.join(path, INIT_MARKER), "w") as f:
-        json.dump({
-            "serial": serial,
-            "model": model.get("name"),
-            "initialized": datetime.now(timezone.utc).isoformat(),
-            "node": NODE_NAME,
-        }, f, indent=2)
 
 
 # --------------------------------------------------------------------------- #
@@ -554,7 +514,7 @@ def _node_affinity(node):
 
 
 def provision_pvc(v1, storage_v1, pvc, devices):
-    """Provision a PV for `pvc` if its StorageClass deviceClass matches a local device."""
+    """Provision a PV for `pvc` if its StorageClass matches a local mounted device."""
     if pvc.spec.volume_name:
         return
     sc_name = pvc.spec.storage_class_name
@@ -568,20 +528,15 @@ def provision_pvc(v1, storage_v1, pvc, devices):
         raise
     if sc.provisioner != PROVISIONER:
         return
-    sc_class = (sc.parameters or {}).get("deviceClass")
-    if not sc_class:
-        log.warning("StorageClass %s missing 'deviceClass' parameter", sc_name)
-        return
 
     selected = (pvc.metadata.annotations or {}).get(SELECTED_NODE_ANN)
     if selected and selected != NODE_NAME:
         return
 
-    # Pick a local, ready (mounted) device whose class matches the StorageClass.
     candidates = [
         d for d in devices
-        if d.get("class_name") == sc_class
-        and d.get("mountpoint") == DATA_MOUNTPOINT
+        if d.get("mountpoint") == DATA_MOUNTPOINT
+        and device_matches_sc(d, sc)
     ]
     if not candidates:
         return  # no matching drive on this node — handled by another node, or wait
@@ -590,7 +545,7 @@ def provision_pvc(v1, storage_v1, pvc, devices):
     target = os.path.join(HOST_DATA, pvc.metadata.name)
     os.makedirs(target, exist_ok=True)
 
-    pv = _build_pv(pvc, sc, sc_class, NODE_NAME, device.get("serial"))
+    pv = _build_pv(pvc, sc, sc_name, NODE_NAME, device.get("serial"))
     try:
         v1.create_persistent_volume(pv)
     except ApiException as e:
@@ -598,13 +553,13 @@ def provision_pvc(v1, storage_v1, pvc, devices):
             return
         raise
 
-    log.info("provisioned PV %s for PVC %s/%s on %s (class=%s, device serial=%s)",
+    log.info("provisioned PV %s for PVC %s/%s on %s (sc=%s, device serial=%s)",
              pv.metadata.name, pvc.metadata.namespace, pvc.metadata.name,
-             NODE_NAME, sc_class, device.get("serial"))
+             NODE_NAME, sc_name, device.get("serial"))
     emit_event(
         v1, "Provisioned",
         f"PV {pv.metadata.name} provisioned on {NODE_NAME} "
-        f"(class {sc_class}, device serial {device.get('serial')})",
+        f"(StorageClass {sc_name}, device serial {device.get('serial')})",
         regarding=client.V1ObjectReference(
             api_version="v1", kind="PersistentVolumeClaim",
             namespace=pvc.metadata.namespace, name=pvc.metadata.name,
@@ -785,32 +740,40 @@ def migrate_device(v1, serial, old_node, new_node):
 
 def reconcile(v1, storage_v1, co):
     devices = discover_devices()
-    classes = load_classes(co)
+    sclasses = list_our_storageclasses(storage_v1)
 
-    # Tag each device with the class that matched (if any).
+    # Per device, find every StorageClass that would accept it. Multiple SCs
+    # can match the same physical drive — e.g. retain-policy and delete-policy
+    # variants of the same hardware definition.
     for d in devices:
-        c = device_class_for(d, classes)
-        d["class_name"] = c["name"] if c else None
-        d["_class"] = c
-        if not c:
+        d["_matched_scs"] = [sc for sc in sclasses if device_matches_sc(d, sc)]
+        if not d["_matched_scs"]:
             serial = d.get("serial") or d["device"]
             if serial not in _logged_unmatched:
-                log.info("ignored device %s (no class matched): vendor=%r model=%r serial=%s fs=%s",
+                log.info("ignored device %s (no StorageClass matched): vendor=%r model=%r serial=%s fs=%s",
                          d["device"], d.get("vendor"), d.get("model"),
                          d.get("serial"), d.get("fs_uuid"))
                 _logged_unmatched.add(serial)
 
-    # Format + mount matching devices before doing anything else. Sorted by
-    # device path so the first matching drive wins /data deterministically.
-    for d in sorted([x for x in devices if x.get("_class")],
+    # Format + mount any matching device. The first matching SC's autoFormat /
+    # fsLabel policy is used (they should agree across SCs targeting the same
+    # hardware; we don't try to reconcile conflicts). Sorted by device path so
+    # the first matching drive wins /data deterministically.
+    for d in sorted([x for x in devices if x["_matched_scs"]],
                     key=lambda x: x["device"]):
         try:
-            ensure_ready(d, d["_class"])
+            ensure_ready(d, d["_matched_scs"][0])
         except Exception:
             log.exception("ensure_ready failed for %s", d["device"])
 
-    local_class_names = {d["class_name"] for d in devices if d.get("class_name")}
-    update_node_labels(v1, local_class_names)
+    # Label this node with class-<scname>=true for every SC that has a ready
+    # matching device locally.
+    local_sc_names = {
+        sc.metadata.name
+        for d in devices if d.get("mountpoint") == DATA_MOUNTPOINT
+        for sc in d["_matched_scs"]
+    }
+    update_node_labels(v1, local_sc_names)
 
     # Registry update + insertion / initialization / migration detection.
     registry = registry_load(co)
@@ -822,7 +785,6 @@ def reconcile(v1, storage_v1, co):
         if not serial:
             continue  # can't track devices without a serial
         local_serials.add(serial)
-        c = d["_class"]
         existing = registry.get(serial)
 
         # Migration: this serial was last seen on a different node.
@@ -832,7 +794,7 @@ def reconcile(v1, storage_v1, co):
                         serial, old_node, NODE_NAME)
             emit_event(
                 v1, "DeviceMigrated",
-                f"Device serial {serial} (class {existing.get('class')}) "
+                f"Device serial {serial} ({d.get('vendor')!r} {d.get('model')!r}) "
                 f"moved from {old_node} to {NODE_NAME}",
                 type_="Warning",
             )
@@ -840,7 +802,6 @@ def reconcile(v1, storage_v1, co):
 
         entry = {
             "serial": serial,
-            "class": c["name"] if c else None,
             "vendor": d.get("vendor"),
             "model": d.get("model"),
             "fsUUID": d.get("fs_uuid"),
@@ -852,41 +813,27 @@ def reconcile(v1, storage_v1, co):
         }
 
         if not existing:
-            log.info("device inserted: class=%s serial=%s fs=%s vendor=%r product=%r node=%s",
-                     entry["class"], serial, entry["fsUUID"],
-                     d.get("vendor"), d.get("model"), NODE_NAME)
+            log.info("device inserted: serial=%s vendor=%r product=%r fs=%s node=%s",
+                     serial, d.get("vendor"), d.get("model"),
+                     entry["fsUUID"], NODE_NAME)
             emit_event(
                 v1, "DeviceInserted",
-                f"Device (class {entry['class'] or 'unmatched'}, serial {serial}) "
+                f"Device serial {serial} ({d.get('vendor')!r} {d.get('model')!r}) "
                 f"inserted on {NODE_NAME}",
             )
 
         registry_upsert(co, serial, entry)
-
-        # Initialization: only if a class matched, device is mounted, and it's blank.
-        if c and d.get("mountpoint") and is_blank(d["mountpoint"]):
-            log.info("initializing device class=%s serial=%s at %s",
-                     c["name"], serial, d["mountpoint"])
-            try:
-                initialize_device(d["mountpoint"], c, serial)
-                emit_event(
-                    v1, "DeviceInitialized",
-                    f"Initialized device (class {c['name']}, serial {serial}) "
-                    f"at {d['mountpoint']} on {NODE_NAME}",
-                )
-            except OSError:
-                log.exception("initialization failed for serial %s", serial)
 
     # Removal: registry says the device is here, but we don't see it any more.
     for serial, entry in list(registry.items()):
         if (entry.get("currentNode") == NODE_NAME
                 and entry.get("phase") != "Removed"
                 and serial not in local_serials):
-            log.info("device removed: class=%s serial=%s (was on %s)",
-                     entry.get("class"), serial, NODE_NAME)
+            log.info("device removed: serial=%s vendor=%r product=%r (was on %s)",
+                     serial, entry.get("vendor"), entry.get("model"), NODE_NAME)
             emit_event(
                 v1, "DeviceRemoved",
-                f"Device serial {serial} (class {entry.get('class')}) "
+                f"Device serial {serial} ({entry.get('vendor')!r} {entry.get('model')!r}) "
                 f"removed from {NODE_NAME}",
             )
             entry["phase"] = "Removed"
