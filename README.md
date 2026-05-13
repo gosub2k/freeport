@@ -14,12 +14,13 @@ The controller is a DaemonSet — one pod per node. Each pod:
 * Detects USB block devices on its node by reading `/host/sys/block` and
   `/host/proc/1/mountinfo` (no external binaries needed). Matches each
   device against every StorageClass.
-* Records every USB drive seen in an **etcd-backed registry**: one
-  `USBDevice` CR (`frankencluster.local/v1`) per serial number, with the
-  device's identity (`vendor`, `model`, `serial`, `firstSeen`) in `.spec`
-  and live state (`currentNode`, `lastSeen`, `phase`, `fsUUID`,
-  `mountpoint`) on the `.status` subresource. `kubectl get usbdevice` to
-  inspect.
+* Records every USB drive seen as an annotation on every StorageClass
+  that matches it. Key:
+  `usb-storage.frankencluster.local/dev.<sanitised-serial>`; value is a
+  JSON blob with `serial`, `vendor`, `model`, `fs_uuid`, `node`,
+  `mountpoint`, `phase` (`Present`/`Removed`), and first/last-seen
+  timestamps. Annotations are patched per-key so concurrent daemons on
+  different nodes don't conflict. Inspect with `kubectl get sc <name> -o yaml`.
 * **Initialises** a blank filesystem with the directory structure the
   model declares, and drops a `.usb-storage-init` marker so it only runs
   once per drive.
@@ -57,7 +58,6 @@ Dockerfile                      # python:3.12-slim + kubernetes + PyYAML
 requirements.txt
 test.sh                         # end-to-end smoke test (kubectl-based)
 deploy/
-  crd-usbdevice.yaml            # USBDevice CRD (per-drive runtime registry)
   rbac.yaml                     # Namespace + SA + ClusterRole/Binding + Role/Binding
   daemonset.yaml                # DaemonSet + headless Service
   storageclass-example.yaml     # two example StorageClasses (glob + serial)
@@ -71,7 +71,7 @@ None. Just plug the USB in. The daemon:
 2. matches it against every `StorageClass` whose provisioner is ours,
 3. if matched and unformatted, runs `mkfs.ext4` on it (set `parameters.autoFormat: "true"` on the StorageClass),
 4. mounts it at `/data` in the host's mount namespace,
-5. registers it as a `USBDevice` CR in the cluster.
+5. records it as a `usb-storage.frankencluster.local/dev.<serial>` annotation on every matching StorageClass.
 
 All host operations run via `nsenter --target 1`, so the container needs
 `privileged: true` + `hostPID: true` (already set in `deploy/daemonset.yaml`).
@@ -108,9 +108,8 @@ and `mount` binaries directly.
    ```bash
    kubectl -n dimsum get ds usb-storage-provisioner
    kubectl -n dimsum logs -l app=usb-storage-provisioner --tail=40
-   kubectl get sc                        # the storage classes you defined
-   kubectl get usbdevice                 # one CR per physical drive seen
-   kubectl get usbdevice -o wide         # adds FS-UUID + Serial columns
+   kubectl get sc                                                       # storage classes you defined
+   kubectl get sc <name> -o jsonpath='{.metadata.annotations}' | jq     # the registered drives
    kubectl get nodes --show-labels | grep usb-storage
    kubectl -n dimsum get events
    ```
@@ -167,7 +166,7 @@ many nodes — one-class-to-many-drives.
    /data`, then emit `DeviceInserted`:
    ```bash
    kubectl -n dimsum get events --sort-by=.lastTimestamp | tail -10
-   kubectl get usbdevice
+   kubectl get sc <name> -o jsonpath='{.metadata.annotations}' | jq
    ```
 3. **Use it.** Any PVC pointing at a matching StorageClass is now
    provisionable.
@@ -234,9 +233,9 @@ STORAGE_CLASS=usb-local-c ./test.sh
 ## Troubleshooting
 
 * `Pending` PVC, no `selected-node` annotation — no node has the matching
-  `usb-storage.frankencluster.local/class-<className>=true` label. Check
-  `kubectl get nodes --show-labels` and that a matching device appears in
-  `kubectl get usbdevice`.
+  `usb-storage.frankencluster.local/class-<scname>=true` label. Check
+  `kubectl get nodes --show-labels` and look for `dev.*` annotations on
+  the StorageClass: `kubectl get sc <name> -o yaml`.
 * `selected-node` set but no PV — check the daemon logs on that node.
 * `Device inserted` event missing but drive is plugged in — the device
   probably doesn't match any StorageClass. Check

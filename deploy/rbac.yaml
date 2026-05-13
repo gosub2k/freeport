@@ -26,19 +26,15 @@ rules:
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
+    # patch is needed so we can write device-registry annotations
+    # (usb-storage.frankencluster.local/dev.<serial>) on the SCs.
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]
-  - apiGroups: ["frankencluster.local"]
-    resources: ["usbdevices"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: ["frankencluster.local"]
-    resources: ["usbdevices/status"]
-    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
