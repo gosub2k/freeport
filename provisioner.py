@@ -2,29 +2,30 @@
 
 import logging
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from abc import ABC,  abstractmethod
 from enum import Enum
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("freeport")
 
 
+"""Typed alias for USB serial numbers."""
+
+
 class Serial(str):
-    """Typed alias for USB serial numbers."""
-
     pass
-
 
 
 class BlockDeviceType(Enum):
     """Kind of host block device.
-
     usb, mmc, etc ... right now only usb is supported.
     """
 
+    # Enum values
     USB = "usb"
 
+    # lookup - ie BlockDeviceType("usb") = BlockDeviceType.USB
     @classmethod
     def _missing_(cls, value: str):
         for member in cls:
@@ -46,6 +47,7 @@ class HostBlockDevice:
 
     def __str__(self):
         return f'serial: {self.serial}, vendor: {self.vendor or "_"}, type: {self.type}, model: {self.model or ""} partitions: {self.partition or "??"}'
+
     def __eq__(self, other):
         # REVISIT: could warn if serial is the same but others are different
         # unknown if serials are always present or truely unique
@@ -63,7 +65,6 @@ class DeviceFilter:
     model_exp: str
     serial_exp: str
     type_exp: str  # should validate against mapping in BlockDeviceType - LATER
-
 
     @staticmethod
     def _match(expr: str, value: str) -> bool:
@@ -85,7 +86,7 @@ class DeviceFilter:
         return False
 
     def __call__(self, dev: HostBlockDevice) -> bool:
-        """ does filter match? all set fields must pass """
+        """does filter match? all set fields must pass"""
         return (
             self._match(self.device_exp, dev.device)
             and self._match(self.vendor_exp, dev.vendor)
@@ -104,11 +105,11 @@ class USBDeviceManager(ABC):
     @abstractmethod
     def _list_usb_devices_on_system(self) -> list[HostBlockDevice]:
         # grabs the block devices on the system
-        # we can 
+        # we can
         pass
 
     @abstractmethod
-    def _add_device_to_known_devices(self, device: HostBlockDevice) -> None:
+    def _add_device_to_known_devices(self, device: HostBlockDevice) -> bool:
         pass
 
     @abstractmethod
@@ -118,7 +119,6 @@ class USBDeviceManager(ABC):
     @abstractmethod
     def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
         pass
-            
 
     def reconcile(self):
         system_devices = self._list_usb_devices_on_system()
@@ -130,18 +130,18 @@ class USBDeviceManager(ABC):
 
         known_devices = self._get_known_devices()
         for kd in known_devices:
-            if kd not in system_devices:  # should be using the HostBlockDevice.__eq__() method
+            if (
+                kd not in system_devices
+            ):  # should be using the HostBlockDevice.__eq__() method
                 self._remove_device_from_known_devices(kd)
-
 
 
 class InMemoryUSBDeviceManager(USBDeviceManager):
 
-    USB_DEVDIR="/dev/disk/by-id"
-    USB_REGEXP=r"usb-(.*)-part(\d+)" # /dev/disk/by-id/usb-_USB_DISK_2.0_900053B3E984FA19-0:0-part1 
-    def __init__(
-        self, filter: DeviceFilter
-    ) -> None:
+    USB_DEVDIR = "/dev/disk/by-id"
+    USB_REGEXP = r"usb-(.*)-part(\d+)"  # /dev/disk/by-id/usb-_USB_DISK_2.0_900053B3E984FA19-0:0-part1
+
+    def __init__(self, filter: DeviceFilter) -> None:
         self._filter = filter
         self._known_devices: list[HostBlockDevice] = list()
         # what the "kernel" sees; injectable for tests, mutate to simulate
@@ -149,28 +149,55 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
         self._system_devices: list[HostBlockDevice] = list()
 
     def _list_usb_devices_on_system(self) -> list[HostBlockDevice]:
-        # TODO: this should list all usb devices by looking at
-        # /dev/disk/by-id/usb- *part for example
-        devs: list[HostBlockDevice] = list[HostBlockDevice]
+        # list all usb partitions by reading /dev/disk/by-id, e.g.
+        # usb-_USB_DISK_2.0_900053B3E984FA19-0:0-part1 -> /dev/sda1
         import os
-        for f in os.listdir()
 
-        # use os.path.realath,  maybe .startwith or .contains to check usb devices
-        #
-        # appy the filter
-        #
-        # log which match with (*)
-        # (*) device ...
-        #     device
+        devs: list[HostBlockDevice] = []
+        pattern = re.compile(self.USB_REGEXP)
+        try:
+            entries = os.listdir(self.USB_DEVDIR)
+        except OSError:
+            log.warning("cannot read %s", self.USB_DEVDIR)
+            return devs
 
+        for name in sorted(entries):
+            m = pattern.fullmatch(name)
+            if not m:
+                continue  # not a usb partition link
+            ident, partition = m.group(1), int(m.group(2))
+            device = os.path.realpath(os.path.join(self.USB_DEVDIR, name))
 
-    def _add_device_to_known_devices(self, device: HostBlockDevice) -> None:
+            dev = HostBlockDevice(
+                device=device,
+                vendor="",
+                type=BlockDeviceType.USB,
+                model="",
+                serial=Serial(ident),
+                partition=partition,
+            )
+
+            # apply the filter; log matches with a leading (*)
+            if self._filter(dev):
+                log.info("(*) %s", dev)
+                devs.append(dev)
+            else:
+                log.info("    %s", dev)
+
+        return [d for d in devs if self._filter(d)]
+
+    def _add_device_to_known_devices(self, device: HostBlockDevice) -> bool:
+        if device in self._known_devices:
+            return False
         self._known_devices.append(device)
-        log.info("device added: serial=%s model=%r", device.serial, device.model)
+        log.info(f"device added: {device}")
+        return True
 
     def _get_known_devices(self) -> list[HostBlockDevice]:
         return list(self._known_devices)
 
     def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
-        # TODO this should simply remove the device frm the ist (true if found)
-
+        if device not in self._known_devices:
+            return False
+        self._known_devices.remove(device)
+        return True
