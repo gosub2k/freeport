@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -24,6 +25,7 @@ class BlockDeviceType(Enum):
 
     # Enum values
     USB = "usb"
+    NVME = "nvme"
 
     # lookup - ie BlockDeviceType("usb") = BlockDeviceType.USB
     @classmethod
@@ -46,7 +48,7 @@ class HostBlockDevice:
     partition: int
 
     def __str__(self):
-        return f'serial: {self.serial}, vendor: {self.vendor or "_"}, type: {self.type}, model: {self.model or ""} partitions: {self.partition or "??"}'
+        return f'serial: {self.serial}, vendor: {self.vendor or "_"}, type: {self.type}, model: {self.model or ""} partition: {self.partition or "??"}'
 
     def __eq__(self, other):
         # REVISIT: could warn if serial is the same but others are different
@@ -60,11 +62,11 @@ class DeviceFilter:
 
     # expressions are a cannonical-style expression
     # we match ie "SAMSUNG.*" or "FIJI,SAMSUNG,FOO"
-    device_exp: str
-    vendor_exp: str
-    model_exp: str
-    serial_exp: str
-    type_exp: str  # should validate against mapping in BlockDeviceType - LATER
+    device: str = ""
+    vendor: str = ""
+    model: str = ""
+    serial: str = ""
+    type: str = ""  # validate against the enum value
 
     @staticmethod
     def _match(expr: str, value: str) -> bool:
@@ -88,11 +90,11 @@ class DeviceFilter:
     def __call__(self, dev: HostBlockDevice) -> bool:
         """does filter match? all set fields must pass"""
         return (
-            self._match(self.device_exp, dev.device)
-            and self._match(self.vendor_exp, dev.vendor)
-            and self._match(self.model_exp, dev.model)
-            and self._match(self.serial_exp, dev.serial)
-            and self._match(self.type_exp, dev.type.value)
+            self._match(self.device, dev.device)
+            and self._match(self.vendor, dev.vendor)
+            and self._match(self.model, dev.model)
+            and self._match(self.serial, dev.serial)
+            and self._match(self.type, dev.type.value)
         )
 
 
@@ -139,7 +141,7 @@ class USBDeviceManager(ABC):
 class InMemoryUSBDeviceManager(USBDeviceManager):
 
     USB_DEVDIR = "/dev/disk/by-id"
-    USB_REGEXP = r"usb-(.*)-part(\d+)"  # /dev/disk/by-id/usb-_USB_DISK_2.0_900053B3E984FA19-0:0-part1
+    USB_REGEXP = r"usb-.*_(.*?)-.*part(\d+)"  # /dev/disk/by-id/usb-_USB_DISK_2.0_900053B3E984FA19-0:0-part1
 
     def __init__(self, filter: DeviceFilter) -> None:
         self._filter = filter
@@ -201,3 +203,15 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
             return False
         self._known_devices.remove(device)
         return True
+
+
+def main():
+    filter = DeviceFilter(*{"type": "usb,nvme"})
+    mngr = InMemoryUSBDeviceManager(filter)
+    while True:
+        mngr.reconcile()
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()
