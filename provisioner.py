@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import re
 from dataclasses import dataclass
 from abc import ABC,  abstractmethod
 from enum import Enum
@@ -17,10 +18,19 @@ class Serial(str):
 
 
 class BlockDeviceType(Enum):
+    """Kind of host block device.
 
-    # usb, mmc, etc ...
-    # right now only usb is supported
-    # maps strings to types also: usb -> BlockDeviceType.USB
+    usb, mmc, etc ... right now only usb is supported.
+    """
+
+    USB = "usb"
+
+    @classmethod
+    def _missing_(cls, value: str):
+        for member in cls:
+            if member.value == value:
+                return member
+        raise ValueError()
 
 
 @dataclass
@@ -32,9 +42,10 @@ class HostBlockDevice:
     type: BlockDeviceType
     model: str
     serial: Serial
-    fs_uuid: str | None
-    mountpoint: str | None
+    partition: int
 
+    def __str__(self):
+        return f'serial: {self.serial}, vendor: {self.vendor or "_"}, type: {self.type}, model: {self.model or ""} partitions: {self.partition or "??"}'
     def __eq__(self, other):
         # REVISIT: could warn if serial is the same but others are different
         # unknown if serials are always present or truely unique
@@ -53,9 +64,35 @@ class DeviceFilter:
     serial_exp: str
     type_exp: str  # should validate against mapping in BlockDeviceType - LATER
 
+
+    @staticmethod
+    def _match(expr: str, value: str) -> bool:
+        """Match `value` against one canonical expression.
+
+        An expression is a comma-separated list of regex alternatives, e.g.
+        "SAMSUNG.*" or "FIJI,SAMSUNG,FOO". The value must fully match at
+        least one alternative. An empty expression matches anything (the
+        field is not used to discriminate).
+        """
+        if not expr:
+            return True
+        if not value:
+            return False
+        for alt in expr.split(","):
+            alt = alt.strip()
+            if alt and re.fullmatch(alt, value):
+                return True
+        return False
+
     def __call__(self, dev: HostBlockDevice) -> bool:
-        """ does filter match? """
-        pass
+        """ does filter match? all set fields must pass """
+        return (
+            self._match(self.device_exp, dev.device)
+            and self._match(self.vendor_exp, dev.vendor)
+            and self._match(self.model_exp, dev.model)
+            and self._match(self.serial_exp, dev.serial)
+            and self._match(self.type_exp, dev.type.value)
+        )
 
 
 class USBDeviceManager(ABC):
@@ -79,7 +116,7 @@ class USBDeviceManager(ABC):
         pass
 
     @abstractmethod
-    def _remove_device_from_known_devices(self, HostBlockDevice):
+    def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
         pass
             
 
@@ -100,11 +137,40 @@ class USBDeviceManager(ABC):
 
 class InMemoryUSBDeviceManager(USBDeviceManager):
 
-    def __init__(self, filter: DeviceFilter) -> None:
-        # super().__init__(filter)
-       self._known_devices: list[HostBlockDevice] = list()
-       self._filter = filter
+    USB_DEVDIR="/dev/disk/by-id"
+    USB_REGEXP=r"usb-(.*)-part(\d+)" # /dev/disk/by-id/usb-_USB_DISK_2.0_900053B3E984FA19-0:0-part1 
+    def __init__(
+        self, filter: DeviceFilter
+    ) -> None:
+        self._filter = filter
+        self._known_devices: list[HostBlockDevice] = list()
+        # what the "kernel" sees; injectable for tests, mutate to simulate
+        # insertion / removal between reconcile() calls.
+        self._system_devices: list[HostBlockDevice] = list()
 
-    # TODO: implement
-    #
-    
+    def _list_usb_devices_on_system(self) -> list[HostBlockDevice]:
+        # TODO: this should list all usb devices by looking at
+        # /dev/disk/by-id/usb- *part for example
+        devs: list[HostBlockDevice] = list[HostBlockDevice]
+        import os
+        for f in os.listdir()
+
+        # use os.path.realath,  maybe .startwith or .contains to check usb devices
+        #
+        # appy the filter
+        #
+        # log which match with (*)
+        # (*) device ...
+        #     device
+
+
+    def _add_device_to_known_devices(self, device: HostBlockDevice) -> None:
+        self._known_devices.append(device)
+        log.info("device added: serial=%s model=%r", device.serial, device.model)
+
+    def _get_known_devices(self) -> list[HostBlockDevice]:
+        return list(self._known_devices)
+
+    def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
+        # TODO this should simply remove the device frm the ist (true if found)
+
