@@ -121,6 +121,7 @@ class USBDeviceManager(ABC):
         pass
 
     def reconcile(self):
+        # REVISIT: cleaner logic for multi node setup?
         system_devices = self._list_usb_devices_on_system()
         known_devices = self._get_known_devices()
 

@@ -95,7 +95,11 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
         except ApiException:
             log.exception("listing BlockDevices failed")
             return []
-        return [_from_cr(o) for o in resp.get("items", [])]
+        return [
+            _from_cr(o)
+            for o in resp.get("items", [])
+            if o.get("spec").get("node") == self._node
+        ]
 
     def _add_device_to_known_devices(self, device: HostBlockDevice) -> bool:
         name = _cr_name(device.serial)
@@ -149,12 +153,41 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
             return True
 
     def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
-        # device is gone from the system -> delete its CR.
         name = _cr_name(device.serial)
         try:
-            self._api.delete_cluster_custom_object(GROUP, VERSION, PLURAL, name)
+            existing = self._api.get_cluster_custom_object(GROUP, VERSION, PLURAL, name)
         except ApiException as e:
             if e.status == 404:
+                return False
+            raise
+
+        # Not necessary because the other functions check owner, but
+        # Re-check the owner of the block device explicitly
+        if existing.get("spec").get("node") != self._node:
+            log.info(
+                "not deleting BlockDevice %s: owned by %s, not us (%s)",
+                name,
+                existing.get("spec").get("node"),
+                self._node,
+            )
+            return False
+
+        # Probably not needed because of slow period of other reconcile loops in k8s, but:
+        # Compare and delete atomically - avoid deleting if its owned by another node.
+        meta = existing.get("metadata")
+        opts = client.V1DeleteOptions(
+            preconditions=client.V1Preconditions(
+                resource_version=meta.get("resourceVersion"),
+                uid=meta.get("uid"),
+            )
+        )
+        try:
+            self._api.delete_cluster_custom_object(
+                GROUP, VERSION, PLURAL, name, body=opts
+            )
+        except ApiException as e:
+            # 404: already gone; 409: changed under us (e.g. migrated) -> skip.
+            if e.status in (404, 409):
                 return False
             raise
         log.info("BlockDevice deleted: %s", device)
