@@ -17,14 +17,8 @@ import re
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from provisioner import (
-    BlockDeviceType,
-    DeviceFilter,
-    HostBlockDevice,
-    InMemoryUSBDeviceManager,
-    Serial,
-    log,
-)
+from abstract_manager import BlockDeviceType, DeviceFilter, HostBlockDevice, Serial, log
+from inmemory_manager import InMemoryUSBDeviceManager
 
 GROUP = "freeport.local"
 VERSION = "v1alpha1"
@@ -61,6 +55,7 @@ def _from_cr(obj: dict) -> HostBlockDevice:
         serial=Serial(s.get("serial", "")),
         partition=s.get("partition", 0),
         free=s.get("free", 0),
+        mountpoint=s.get("mountpoint", ""),
     )
 
 
@@ -210,13 +205,14 @@ if __name__ == "__main__":
         # REVISIT: need to patch these inside k8s expect them as volumes
         mngr.USB_DEVDIR = environ["USB_DEVDIR"]
         mngr.SYS_CLASS_BLOCK = environ["SYS_CLASS_BLOCK"]
+        mngr.HOST_MOUNT = environ["HOST_MOUNT"]
     except config.ConfigException:
         # device manager inside k8s didnt find k8s api
         mngr = K8sUSBDeviceManager(
             filter=DeviceFilter(), node_name=str(node_name), in_cluster=False
         )
     except KeyError as e:
-        log.fatal(f"must set USB_DEVDIR and SYS_CLASS_BLOCK: {e}")
+        log.fatal(f"must set USB_DEVDIR and SYS_CLASS_BLOCK and HOST_MOUNT: {e}")
         exit(2)
     while True:
         mngr.reconcile()

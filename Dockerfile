@@ -8,7 +8,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN uv pip install --system -r requirements.txt
 
-COPY provisioner.py .
+COPY abstract_manager.py .
+COPY inmemory_manager.py .
 COPY k8s_manager.py .
 
 ENTRYPOINT ["python", "/app/k8s_manager.py"]

@@ -44,13 +44,18 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        # REVISIT: if its ok to just use /mnt
+        - name: HOST_MOUNT
+          value: /host-mount
         volumeMounts:
         - name: host-dev 
           mountPath: /dev
         - name: host-sys
           mountPath: /sys
-        - name: host-proc
-          mountPath: /proc
+        - name: host-mnt
+          mountPath: /host-mount
+        # - name: host-proc
+          # mountPath: /proc
       volumes:
       - name: host-dev 
         hostPath:
@@ -58,7 +63,10 @@ spec:
       - name: host-sys
         hostPath:
           path: /sys
-      # NOTE: /proc/mounts on host looks different from in container?
-      - name: host-proc
+      - name: host-mnt
         hostPath:
-          path: /proc
+          path: /mnt
+      # NOTE: /proc/mounts on host looks different from in container?
+      # - name: host-proc
+      #   hostPath:
+      #     path: /proc
