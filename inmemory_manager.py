@@ -20,11 +20,10 @@ from abstract_manager import (
 # nsenter into the host mount + PID namespaces via PID 1 (requires hostPID:
 # true and privileged: true in the DaemonSet spec). The mount call then takes
 # effect on the host, so hostPath PV subdirs are visible to other pods.
-_NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
+# _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
 
 
 def get_df(dev_path) -> int:
-    dev_path = re.sub("/mnt", InMemoryUSBDeviceManager.HOST_MOUNT, dev_path)
     try:
         st = os.statvfs(dev_path)
         df = st.f_bavail * st.f_frsize  # available to non-root
@@ -35,7 +34,7 @@ def get_df(dev_path) -> int:
         return 0
 
 
-def mount(dev_path: str, serial: str) -> str | None:
+def mount(dev_path: str, serial: str) -> str:
     # mount the device onto the host so that we can later create sub dirs that can be
     # used in local or hostPath sources for PVs.
     mountpoint = f"/mnt/k8s-freeport-{serial}"
@@ -48,22 +47,22 @@ def mount(dev_path: str, serial: str) -> str | None:
     except OSError:
         pass
 
-    subprocess.run(_NSENTER + ["mkdir", "-p", mountpoint], check=True)
+    subprocess.run(["mkdir", "-p", mountpoint], check=True)
     result = subprocess.run(
-        _NSENTER + ["mount", dev_path, mountpoint], capture_output=True, text=True
+        ["mount", dev_path, mountpoint], capture_output=True, text=True
     )
     if result.returncode != 0:
         log.error(
             "mount %s -> %s failed: %s", dev_path, mountpoint, result.stderr.strip()
         )
-        return None
+        # REVISIT: account for mount failures
+        return ""
     log.info("mounted %s at %s", dev_path, mountpoint)
     return mountpoint
 
 
 class InMemoryUSBDeviceManager(USBDeviceManager):
 
-    HOST_MOUNT = "/mnt"
     USB_DEVDIR = "/dev/disk/by-id"
     SYS_CLASS_BLOCK = "/sys/class/block"
     # usb-...-partN only identifies a usb partition link and its number;
