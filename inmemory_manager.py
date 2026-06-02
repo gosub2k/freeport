@@ -15,53 +15,12 @@ from abstract_manager import (
     log,
 )
 
-# Utils
-
-# nsenter into the host mount + PID namespaces via PID 1 (requires hostPID:
-# true and privileged: true in the DaemonSet spec). The mount call then takes
-# effect on the host, so hostPath PV subdirs are visible to other pods.
-# _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
-
-
-def get_df(dev_path) -> int:
-    try:
-        st = os.statvfs(dev_path)
-        df = st.f_bavail * st.f_frsize  # available to non-root
-        log.info("get_df(%s) = %d", dev_path, df)
-        return df
-    except Exception as e:
-        log.error(e)
-        return 0
-
-
-def mount(dev_path: str, serial: str) -> str:
-    # mount the device onto the host so that we can later create sub dirs that can be
-    # used in local or hostPath sources for PVs.
-    mountpoint = f"/mnt/k8s-freeport-{serial}"
-    try:
-        with open("/proc/1/mounts") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] == dev_path:
-                    return parts[1]  # already mounted, return existing mountpoint
-    except OSError:
-        pass
-
-    subprocess.run(["mkdir", "-p", mountpoint], check=True)
-    result = subprocess.run(
-        ["mount", dev_path, mountpoint], capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        log.error(
-            "mount %s -> %s failed: %s", dev_path, mountpoint, result.stderr.strip()
-        )
-        # REVISIT: account for mount failures
-        return ""
-    log.info("mounted %s at %s", dev_path, mountpoint)
-    return mountpoint
-
-
 class InMemoryUSBDeviceManager(USBDeviceManager):
+
+    # nsenter into the host mount + PID namespaces via PID 1 (requires hostPID:
+    # true and privileged: true in the DaemonSet spec). The mount call then takes
+    # effect on the host, so hostPath PV subdirs are visible to other pods.
+    # _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
 
     USB_DEVDIR = "/dev/disk/by-id"
     SYS_CLASS_BLOCK = "/sys/class/block"
@@ -78,6 +37,44 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
         # what the "kernel" sees; injectable for tests, mutate to simulate
         # insertion / removal between reconcile() calls.
         self._system_devices: list[HostBlockDevice] = list()
+
+    @staticmethod
+    def get_df(dev_path: str) -> int:
+        try:
+            st = os.statvfs(dev_path)
+            df = st.f_bavail * st.f_frsize  # available to non-root
+            log.info("get_df(%s) = %d", dev_path, df)
+            return df
+        except Exception as e:
+            log.error(e)
+            return 0
+
+    @staticmethod
+    def mount(dev_path: str, serial: str) -> str:
+        # mount the device onto the host so that we can later create sub dirs that can be
+        # used in local or hostPath sources for PVs.
+        mountpoint = f"/mnt/k8s-freeport-{serial}"
+        try:
+            with open("/proc/1/mounts") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] == dev_path:
+                        return parts[1]  # already mounted, return existing mountpoint
+        except OSError:
+            pass
+
+        subprocess.run(["mkdir", "-p", mountpoint], check=True)
+        result = subprocess.run(
+            ["mount", dev_path, mountpoint], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            log.error(
+                "mount %s -> %s failed: %s", dev_path, mountpoint, result.stderr.strip()
+            )
+            # REVISIT: account for mount failures
+            return ""
+        log.info("mounted %s at %s", dev_path, mountpoint)
+        return mountpoint
 
     @staticmethod
     def _read_sys_attr(path: str) -> str:
@@ -128,7 +125,7 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
                 log.warning("no usb sysfs node for %s; skipping", device)
                 continue
             serial = Serial(self._read_sys_attr(os.path.join(usb_node, "serial")))
-            mountpoint = mount(device, serial)
+            mountpoint = self.mount(device, serial)
             dev = HostBlockDevice(
                 manufacturer=self._read_sys_attr(
                     os.path.join(usb_node, "manufacturer")
@@ -137,7 +134,7 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
                 model=self._read_sys_attr(os.path.join(usb_node, "product")),
                 serial=serial,
                 partition=partition,
-                free=get_df(mountpoint),
+                free=self.get_df(mountpoint),
                 mountpoint=mountpoint,
             )
 
