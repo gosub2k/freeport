@@ -67,10 +67,22 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
     """
 
     def __init__(
-        self, filter: DeviceFilter, node_name: str, in_cluster: bool = True
+        self,
+        filter: DeviceFilter,
+        node_name: str,
+        in_cluster: bool = True,
+        usb_devdir: str | None = None,
+        sys_class_block: str | None = None,
+        host_mount: str | None = None,
     ) -> None:
         self._filter = filter
         self._node = node_name
+        if usb_devdir:
+            self.USB_DEVDIR = usb_devdir
+        if sys_class_block:
+            self.SYS_CLASS_BLOCK = sys_class_block
+        if host_mount:
+            self.HOST_MOUNT = host_mount
         # in_cluster: running as a pod (use the mounted ServiceAccount);
         # otherwise load the local ~/.kube/config (dev / out-of-cluster).
         if in_cluster:
@@ -201,18 +213,25 @@ if __name__ == "__main__":
         log.fatal("NODE_NAME not defined")
         exit(1)
     try:
-        mngr = K8sUSBDeviceManager(filter=DeviceFilter(), node_name=str(node_name))
-        # REVISIT: need to patch these inside k8s expect them as volumes
-        mngr.USB_DEVDIR = environ["USB_DEVDIR"]
-        mngr.SYS_CLASS_BLOCK = environ["SYS_CLASS_BLOCK"]
-        mngr.HOST_MOUNT = environ["HOST_MOUNT"]
+        mngr = K8sUSBDeviceManager(
+            filter=DeviceFilter(),
+            node_name=str(node_name),
+            usb_devdir=environ["USB_DEVDIR"],
+            sys_class_block=environ["SYS_CLASS_BLOCK"],
+            host_mount=environ["HOST_MOUNT"],
+        )
     except config.ConfigException:
         # device manager inside k8s didnt find k8s api
         mngr = K8sUSBDeviceManager(
-            filter=DeviceFilter(), node_name=str(node_name), in_cluster=False
+            filter=DeviceFilter(),
+            node_name=str(node_name),
+            in_cluster=False,
+            usb_devdir=environ["USB_DEVDIR"],
+            sys_class_block=environ["SYS_CLASS_BLOCK"],
+            host_mount=environ["HOST_MOUNT"],
         )
     except KeyError as e:
-        log.fatal(f"must set USB_DEVDIR and SYS_CLASS_BLOCK and HOST_MOUNT: {e}")
+        log.fatal(f"must set USB_DEVDIR, SYS_CLASS_BLOCK, HOST_MOUNT: {e}")
         exit(2)
     while True:
         mngr.reconcile()

@@ -6,7 +6,13 @@ import re
 import subprocess
 import time
 
-from abstract_manager import DeviceFilter, HostBlockDevice, USBDeviceManager, log
+from abstract_manager import (
+    DeviceFilter,
+    HostBlockDevice,
+    Serial,
+    USBDeviceManager,
+    log,
+)
 
 # Utils
 
