@@ -106,25 +106,30 @@ def build_tree() -> None:
     )
 
 
+def _fake_mount(dev_path: str, serial: str):
+    return f"/mnt/k8s-freeport-{serial}"
+
+
+@mock.patch("provisioner.mount", side_effect=_fake_mount)
 @mock.patch.object(InMemoryUSBDeviceManager, "USB_DEVDIR", BY_ID)
 @mock.patch.object(InMemoryUSBDeviceManager, "SYS_CLASS_BLOCK", SYS_CLASS_BLOCK)
 class ListUsbDevicesTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, *_):
         build_tree()
 
-    def tearDown(self):
+    def tearDown(self, *_):
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
     def _by_serial(self, devs):
         return {d.serial: d for d in devs}
 
-    def test_lists_only_usb_partitions(self):
+    def test_lists_only_usb_partitions(self, *_):
         devs = InMemoryUSBDeviceManager(MATCH_ALL)._list_usb_devices_on_system()
         # sda1 + sda2 + sdb1; whole-disk and ata links ignored
         self.assertEqual(len(devs), 3)
         self.assertTrue(all(d.type is BlockDeviceType.USB for d in devs))
 
-    def test_vendor_and_model_read_from_sysfs(self):
+    def test_vendor_and_model_read_from_sysfs(self, *_):
         # the FIX: vendor=manufacturer, model=product, taken from sysfs.
         # product keeps its spaces ("USB DISK 2.0") — impossible if we'd
         # parsed the underscore-joined by-id name.
@@ -140,7 +145,7 @@ class ListUsbDevicesTest(unittest.TestCase):
         self.assertEqual(sdb.manufacturer, "SanDisk")
         self.assertEqual(sdb.model, "U3 Cruzer Micro")
 
-    def test_serial_read_from_sysfs(self):
+    def test_serial_read_from_sysfs(self, *_):
         # the FIX: serial is the sysfs `serial`, not a chunk of the by-id name.
         serials = {
             d.serial
@@ -148,7 +153,7 @@ class ListUsbDevicesTest(unittest.TestCase):
         }
         self.assertEqual(serials, {"900053B3E984FA19", "0000187DA57212DB"})
 
-    def test_partition_numbers(self):
+    def test_partition_numbers(self, *_):
         devs = InMemoryUSBDeviceManager(MATCH_ALL)._list_usb_devices_on_system()
         parts_by_serial: dict[str, set[int]] = {}
         for d in devs:
@@ -156,27 +161,27 @@ class ListUsbDevicesTest(unittest.TestCase):
         self.assertEqual(parts_by_serial["900053B3E984FA19"], {1, 2})
         self.assertEqual(parts_by_serial["0000187DA57212DB"], {1})
 
-    def test_filter_by_vendor(self):
+    def test_filter_by_vendor(self, *_):
         mgr = InMemoryUSBDeviceManager(DeviceFilter(manufacterer="SanDisk"))
         devs = mgr._list_usb_devices_on_system()
         self.assertEqual(len(devs), 1)
         self.assertEqual(devs[0].serial, "0000187DA57212DB")
 
-    def test_filter_by_serial(self):
+    def test_filter_by_serial(self, *_):
         mgr = InMemoryUSBDeviceManager(DeviceFilter(serial="900053.*"))
         devs = mgr._list_usb_devices_on_system()
         self.assertEqual({d.serial for d in devs}, {"900053B3E984FA19"})
 
-    def test_filter_excludes_everything(self):
+    def test_filter_excludes_everything(self, *_):
         mgr = InMemoryUSBDeviceManager(DeviceFilter(serial="nope-no-match"))
         self.assertEqual(mgr._list_usb_devices_on_system(), [])
 
-    def test_missing_devdir_returns_empty(self):
+    def test_missing_devdir_returns_empty(self, *_):
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
         mgr = InMemoryUSBDeviceManager(MATCH_ALL)
         self.assertEqual(mgr._list_usb_devices_on_system(), [])
 
-    def test_reconcile_adds_then_removes(self):
+    def test_reconcile_adds_then_removes(self, *_):
         mgr = InMemoryUSBDeviceManager(MATCH_ALL)
         mgr.reconcile()
         # 3 partitions, but sda1/sda2 share a serial -> 2 unique known devices
@@ -189,7 +194,7 @@ class ListUsbDevicesTest(unittest.TestCase):
             {d.serial for d in mgr._get_known_devices()}, {"900053B3E984FA19"}
         )
 
-    def test_only_first_partition_gets_added(self):
+    def test_only_first_partition_gets_added(self, *_):
         # sda exposes part1 and part2 with the same (unique) serial; since
         # equality is serial-based, only the first one seen is registered.
         mgr = InMemoryUSBDeviceManager(MATCH_ALL)

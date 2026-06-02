@@ -60,6 +60,7 @@ def _from_cr(obj: dict) -> HostBlockDevice:
         model=s.get("model", ""),
         serial=Serial(s.get("serial", "")),
         partition=s.get("partition", 0),
+        free=s.get("free", 0),
     )
 
 
@@ -119,12 +120,13 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                 patch = {
                     "spec": {
                         "node": self._node,
-                        "manufacturer": device.manufacturer,
-                        "model": device.model,
-                        "type": device.type.value,
-                        "partition": device.partition,
+                        # "manufacturer": device.manufacturer,
+                        # "model": device.model,
+                        # "type": device.type.value,
+                        # "partition": device.partition,
                     },
                 }
+            # TODO - make this a CAS operation
             self._api.patch_cluster_custom_object(GROUP, VERSION, PLURAL, name, patch)
             prev_node = existing.get("spec").get("node", "")
             log.info(
@@ -146,6 +148,7 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                     "serial": str(device.serial),
                     "type": device.type.value,
                     "partition": device.partition,
+                    "free": device.free,
                 },
             }
             self._api.create_cluster_custom_object(GROUP, VERSION, PLURAL, body)

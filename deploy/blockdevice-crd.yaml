@@ -27,46 +27,49 @@ spec:
               # the provisioner owns every field; humans don't edit spec.
               # the CR exists iff the device is currently present.
               properties:
-                node:
+                serial:
                   type: string
-                  description: Node currently holding the device.
+                  description: Unique device serial; the CR is keyed on this.
                 manufacturer:
                   type: string
                 model:
                   type: string
-                serial:
-                  type: string
-                  description: Unique device serial; the CR is keyed on this.
                 type:
                   type: string
                   enum: [usb, nvme]
+                node:
+                  type: string
+                  description: Node currently holding the device.
                 partition:
                   type: integer
                   minimum: 0
-                # firstSeen:
-                #   type: string
-                #   format: date-time
-                # lastSeen:
-                #   type: string
-                #   format: date-time
-                # removedAt:
-                #   # tombstone marker for soft deletes; null while Present.
-                #   type: string
-                #   format: date-time
-                #   nullable: true
+                  description: the first detected partition. Only the first is used.
+                free:
+                  type: integer
+                  minimum: 0
+                  description: Free space in bytes as seen by prlimit64() or similar.
+                mountpoint:
+                  type: string
+                  description: Mountpoint on the host.
       additionalPrinterColumns:
         - name: Node
           type: string
           jsonPath: .spec.node
-        - name: Model
-          type: string
-          jsonPath: .spec.model
         - name: Serial
           type: string
           jsonPath: .spec.serial
-        # - name: Phase
-        #   type: string
-        #   jsonPath: .spec.phase
-        # - name: Age
-        #   type: date
-        #   jsonPath: .metadata.creationTimestamp
+        - name: Model
+          type: string
+          jsonPath: .spec.model
+        - name: Manufacturer
+          type: string
+          jsonPath: .spec.manufacturer
+        - name: "MountPoint"
+          type: string
+          jsonPath: .spec.mountpoint
+        - name: Partition
+          type: integer
+          jsonPath: .spec.partition
+        - name: "Bytes Free"
+          type: integer
+          jsonPath: .spec.free

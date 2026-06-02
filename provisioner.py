@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import subprocess
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -11,6 +12,52 @@ from enum import Enum
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("freeport")
 
+
+# Utils
+
+
+def get_df(dev_path) -> int:
+    try:
+        st = os.statvfs(dev_path)
+        df = st.f_bavail * st.f_frsize  # available to non-root
+        log.info("get_df(%s) = %d", dev_path, df)
+        return df
+    except Exception as e:
+        log.error(e)
+        return 0
+
+
+# nsenter into the host mount + PID namespaces via PID 1 (requires hostPID:
+# true and privileged: true in the DaemonSet spec). The mount call then takes
+# effect on the host, so hostPath PV subdirs are visible to other pods.
+_NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
+
+
+def mount(dev_path: str, serial: str) -> str | None:
+    # mount the device onto the host so that we can later create sub dirs that can be
+    # used in local or hostPath sources for PVs.
+    mountpoint = f"/mnt/k8s-freeport-{serial}"
+    try:
+        with open("/proc/1/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == dev_path:
+                    return parts[1]  # already mounted, return existing mountpoint
+    except OSError:
+        pass
+
+    subprocess.run(_NSENTER + ["mkdir", "-p", mountpoint], check=True)
+    result = subprocess.run(
+        _NSENTER + ["mount", dev_path, mountpoint], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        log.error("mount %s -> %s failed: %s", dev_path, mountpoint, result.stderr.strip())
+        return None
+    log.info("mounted %s at %s", dev_path, mountpoint)
+    return mountpoint
+
+
+# Stuff
 
 """Typed alias for USB serial numbers."""
 
@@ -46,6 +93,8 @@ class HostBlockDevice:
     model: str
     serial: Serial
     partition: int
+    free: int
+    # mountpoint: str
 
     def __str__(self):
         return f'serial: {self.serial}, manufacterer: "{self.manufacturer}", type: {self.type}, model: "{self.model}" partition: {self.partition or "??"}'
@@ -203,23 +252,25 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
             if usb_node is None:
                 log.warning("no usb sysfs node for %s; skipping", device)
                 continue
-
+            serial = Serial(self._read_sys_attr(os.path.join(usb_node, "serial")))
+            mountpoint = mount(device, serial)
             dev = HostBlockDevice(
                 manufacturer=self._read_sys_attr(
                     os.path.join(usb_node, "manufacturer")
                 ),
                 type=BlockDeviceType.USB,
                 model=self._read_sys_attr(os.path.join(usb_node, "product")),
-                serial=Serial(self._read_sys_attr(os.path.join(usb_node, "serial"))),
+                serial=serial,
                 partition=partition,
+                free=get_df(mountpoint),
             )
 
             # apply the filter; log matches with a leading (*)
             if self._filter(dev):
-                log.info("(*) %s", dev)
+                log.debug("(*) %s", dev)
                 devs.append(dev)
             else:
-                log.info("    %s", dev)
+                log.debug("(X) %s", dev)
 
         return devs
 
