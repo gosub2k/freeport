@@ -7,6 +7,7 @@ import subprocess
 import time
 
 from abstract_manager import (
+    BlockDeviceType,
     DeviceFilter,
     HostBlockDevice,
     Serial,
