@@ -12,8 +12,11 @@ Needs the CRD applied first (deploy/blockdevice-crd.yaml) and RBAC to
 get/list/create/patch/delete blockdevices.freeport.local.
 """
 
+import logging
 import re
 import subprocess
+from threading import Thread
+from time import sleep
 
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
@@ -24,6 +27,8 @@ from inmemory_manager import InMemoryUSBDeviceManager
 GROUP = "freeport.local"
 VERSION = "v1alpha1"
 PLURAL = "blockdevices"
+
+MY_PROVISIOER = "local/freeport"
 
 
 def _cr_name(serial: str) -> str:
@@ -60,7 +65,7 @@ def _from_cr(obj: dict) -> HostBlockDevice:
     )
 
 
-class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
+class K8sUSBDeviceManager(InMemoryUSBDeviceManager, Thread):
     """Persists the known-device registry as BlockDevice custom resources.
 
     Inherits all of InMemoryUSBDeviceManager's discovery (by-id scan + sysfs
@@ -69,25 +74,33 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
 
     def __init__(
         self,
-        filter: DeviceFilter,
+        sc: client.V1StorageClass,
         node_name: str,
         in_cluster: bool = True,
         usb_devdir: str | None = None,
         sys_class_block: str | None = None,
         host_mount: str | None = None,
     ) -> None:
-        self._filter = filter
+        Thread.__init__(self, daemon=True)
+        params = sc.parameters
+        self._filter = DeviceFilter(  # Needed by superclass
+            manufacterer=params.get("manufacterer", ""),
+            model=params.get("model", ""),
+            serial=params.get("serial", ""),
+            type=params.get("type", "usb"),
+        )
+        self._sc = sc
         self._node = node_name
         self._USB_DEVDIR = usb_devdir or self._USB_DEVDIR
         self._SYS_CLASS_BLOCK = sys_class_block or self._SYS_CLASS_BLOCK
         self._HOST_MOUNT = host_mount or self._HOST_MOUNT
-        # in_cluster: running as a pod (use the mounted ServiceAccount);
-        # otherwise load the local ~/.kube/config (dev / out-of-cluster).
-        if in_cluster:
-            config.load_incluster_config()
-        else:
-            config.load_kube_config()
         self._api = client.CustomObjectsApi()
+        self._running = True
+        self._log = logging.LoggerAdapter(log, {"sc": self._sc.metadata.name})
+
+    @property
+    def log(self):
+        return self._log
 
     def replace_dev_path(self, dev_path):
         return re.sub(r"/mnt", self._HOST_MOUNT, dev_path)
@@ -119,12 +132,13 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                 PLURAL,
             )
         except ApiException:
-            log.exception("listing BlockDevices failed")
+            self.log.exception("listing BlockDevices failed")
             return []
         return [
             _from_cr(o)
             for o in resp.get("items", [])
             if o.get("spec").get("node") == self._node
+            and o.get("spec").get("class") == self._sc.metadata.name
         ]
 
     def _add_device_to_known_devices(self, device: HostBlockDevice) -> bool:
@@ -153,9 +167,7 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
             # TODO - make this a CAS operation
             self._api.patch_cluster_custom_object(GROUP, VERSION, PLURAL, name, patch)
             prev_node = existing.get("spec").get("node", "")
-            log.info(
-                "BlockDevice updated (node %s -> %s): %s", prev_node, self._node, device
-            )
+            self.log.info("BlockDevice updated (node %s -> %s): %s", prev_node, self._node, device)
             return True
 
         else:
@@ -166,6 +178,7 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                     "name": name,
                 },
                 "spec": {
+                    "storageclass": self._sc.metadata.name,
                     "node": self._node,
                     "manufacturer": device.manufacturer,
                     "model": device.model,
@@ -177,8 +190,11 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                 },
             }
             self._api.create_cluster_custom_object(GROUP, VERSION, PLURAL, body)
-            log.info("BlockDevice created: %s", device)
+            self.log.info("BlockDevice created: %s", device)
             return True
+
+    def _refresh_device_info(self, dev) -> None:
+        return super()._refresh_device_info(dev)
 
     def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
         name = _cr_name(device.serial)
@@ -192,11 +208,15 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
         # Not necessary because the other functions check owner, but
         # Re-check the owner of the block device explicitly
         if existing.get("spec").get("node") != self._node:
-            log.info(
-                "not deleting BlockDevice %s: owned by %s, not us (%s)",
-                name,
-                existing.get("spec").get("node"),
-                self._node,
+            self.log.info(
+                "not deleting BlockDevice %s: belongs to node %s, not us (%s)",
+                name, existing.get("spec").get("node"), self._node,
+            )
+            return False
+        if existing.get("spec").get("class") != self._sc.metadata.name:
+            self.log.info(
+                "not deleting BlockDevice %s: belongs to SC %s, not us",
+                name, existing.get("spec").get("class"),
             )
             return False
 
@@ -218,39 +238,124 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
             if e.status in (404, 409):
                 return False
             raise
-        log.info("BlockDevice deleted: %s", device)
+        self.log.info("BlockDevice deleted: %s", device)
         return True
 
+    def stop(self):
+        self._running = False
 
-if __name__ == "__main__":
+    def run(self):
+        while self._running:
+            self.reconcile()
+            sleep(5)
+
+
+def device_matches_sc(device: HostBlockDevice, sc: client.V1StorageClass) -> bool:
+    """True if `device` satisfies every match field set in `sc.parameters`.
+
+    Supported parameters:
+      vendor   — fnmatch glob against /sys/.../device/vendor
+      model    — fnmatch glob against /sys/.../device/model
+      serials  — comma-separated allowlist; the device serial must be in it
+    At least one of these must be set; otherwise the StorageClass matches
+    nothing (refuse implicit match-everything).
+    """
+    p = sc.parameters or {}
+    has_criteria = False
+    if "vendor" in p and device.vendor is not None:
+        if not fnmatch.fnmatchcase(device.vendor, p["vendor"]):
+            return False
+        has_criteria = True
+    if "model" in p and device.model is not None:
+        if not fnmatch.fnmatchcase(device.model, p["model"]):
+            return False
+        has_criteria = True
+    if "serials" in p and device.serial is not None:
+        if device.serial not in _parse_serials(p["serials"]):
+            return False
+        has_criteria = True
+    return has_criteria
+
+
+def get_manager(sc: client.V1StorageClass) -> K8sUSBDeviceManager:
     from os import environ
-    from time import sleep
 
     node_name = environ.get("NODE_NAME")
     if node_name is None:
         log.fatal("NODE_NAME not defined")
         exit(1)
-    try:
-        mngr = K8sUSBDeviceManager(
-            filter=DeviceFilter(),
-            node_name=str(node_name),
-            usb_devdir=environ["USB_DEVDIR"],
-            sys_class_block=environ["SYS_CLASS_BLOCK"],
-            host_mount=environ["HOST_MOUNT"],
-        )
-    except config.ConfigException:
-        # device manager inside k8s didnt find k8s api
-        mngr = K8sUSBDeviceManager(
-            filter=DeviceFilter(),
-            node_name=str(node_name),
-            in_cluster=False,
-            usb_devdir=environ["USB_DEVDIR"],
-            sys_class_block=environ["SYS_CLASS_BLOCK"],
-            host_mount=environ["HOST_MOUNT"],
-        )
-    except KeyError as e:
-        log.fatal(f"must set USB_DEVDIR, SYS_CLASS_BLOCK, HOST_MOUNT: {e}")
+    usb_devdir = environ.get("USB_DEVDIR")
+    if usb_devdir is None:
+        log.fatal("USB_DEVDIR not set")
         exit(2)
+    sys_class_block = environ.get("SYS_CLASS_BLOCK")
+    if sys_class_block is None:
+        log.fatal("SYS_CLASS_BLOCK not set")
+        exit(2)
+    host_mount = environ.get("HOST_MOUNT")
+    if host_mount is None:
+        log.fatal("HOST_MOUNT not set")
+        exit(2)
+
+    return K8sUSBDeviceManager(
+        sc=sc,
+        node_name=str(node_name),
+        usb_devdir=usb_devdir,
+        sys_class_block=sys_class_block,
+        host_mount=host_mount,
+    )
+
+
+def watch_scs():
+    # sc_name -> (manager, resourceVersion at start time)
+    sc_threads: dict[str, tuple[K8sUSBDeviceManager, str]] = dict()
+    scapi = client.StorageV1Api()
+
     while True:
-        mngr.reconcile()
-        sleep(5)
+        scs = scapi.list_storage_class().items
+        for sc in scs:
+            if sc.provisioner != MY_PROVISIOER:
+                continue
+            sc_name = sc.metadata.name
+            rv = sc.metadata.resource_version
+
+            existing = sc_threads.get(sc_name)
+            if existing is not None:
+                _, known_rv = existing
+                if rv != known_rv:
+                    log.info(
+                        "StorageClass %s changed (rv %s -> %s) — restarting manager",
+                        sc_name,
+                        known_rv,
+                        rv,
+                    )
+                    sc_threads.pop(sc_name)[0].stop()
+                else:
+                    continue
+
+            log.info("new StorageClass detected: %s (rv=%s)", sc_name, rv)
+            mngr = get_manager(sc)
+            mngr.start()
+            sc_threads[sc_name] = (mngr, rv)
+
+        # Stop managers for SCs that were deleted or changed provisioner.
+        current_names = {
+            sc.metadata.name for sc in scs if sc.provisioner == MY_PROVISIOER
+        }
+        for sc_name in list(sc_threads):
+            if sc_name not in current_names:
+                log.info("StorageClass %s removed — stopping manager", sc_name)
+                sc_threads.pop(sc_name)[0].stop()
+
+        sleep(2)
+
+
+if __name__ == "__main__":
+    try:
+        config.load_incluster_config()
+        log.info("loaded in cluster k8s config")
+    except:
+        config.load_config()
+        log.info("loaded local k8s config")
+
+    watch_scs()

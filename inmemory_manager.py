@@ -146,6 +146,10 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
 
         return devs
 
+    # Pretty useless here
+    def _refresh_device_info(self, dev) -> None:
+        pass
+
     def _add_device_to_known_devices(self, device: HostBlockDevice) -> bool:
         if device in self._known_devices:
             return False

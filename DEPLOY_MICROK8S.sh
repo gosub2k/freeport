@@ -5,3 +5,4 @@ for pod in $( kubectl get pods -n freeport --no-headers | cut -d\  -f 1); do
   kubectl delete -n freeport pod $pod &
 done
 kubectl apply -f deploy/
+for d in $(kubectl get bd --no-headers|cut -d \  -f 1); do kubectl delete bd $d; done

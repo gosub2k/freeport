@@ -122,6 +122,10 @@ class USBDeviceManager(ABC):
     def _remove_device_from_known_devices(self, device: HostBlockDevice) -> bool:
         pass
 
+    @abstractmethod
+    def _refresh_device_info(self, device: HostBlockDevice) -> bool:
+        pass
+
     def reconcile(self):
         # REVISIT: cleaner logic for multi node setup?
         system_devices = self._list_usb_devices_on_system()
@@ -130,6 +134,8 @@ class USBDeviceManager(ABC):
         for sd in system_devices:
             if sd not in known_devices:
                 self._add_device_to_known_devices(sd)
+            else:
+                self._refresh_device_info(sd)
 
         known_devices = self._get_known_devices()
         for kd in known_devices:

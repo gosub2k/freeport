@@ -27,6 +27,9 @@ spec:
               # the provisioner owns every field; humans don't edit spec.
               # the CR exists iff the device is currently present.
               properties:
+                class:
+                  type: string
+                  description: Storage class managing the device
                 serial:
                   type: string
                   description: Unique device serial; the CR is keyed on this.
@@ -52,6 +55,9 @@ spec:
                   type: string
                   description: Mountpoint on the host.
       additionalPrinterColumns:
+        - name: Class
+          type: string
+          jsonPath: .spec.class
         - name: Node
           type: string
           jsonPath: .spec.node
