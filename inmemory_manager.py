@@ -15,6 +15,7 @@ from abstract_manager import (
     log,
 )
 
+
 class InMemoryUSBDeviceManager(USBDeviceManager):
 
     # nsenter into the host mount + PID namespaces via PID 1 (requires hostPID:
@@ -42,7 +43,7 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
         try:
             st = os.statvfs(dev_path)
             df = st.f_bavail * st.f_frsize  # available to non-root
-            log.info("get_df(%s) = %d", dev_path, df)
+            log.debug("get_df(%s) = %d", dev_path, df)
             return df
         except Exception as e:
             log.error(e)

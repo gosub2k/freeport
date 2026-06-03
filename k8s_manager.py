@@ -92,16 +92,15 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
     def replace_dev_path(self, dev_path):
         return re.sub(r"/mnt", self._HOST_MOUNT, dev_path)
 
+    # REVISIT: use a different run hook below
     def mount(self, dev_path: str, serial: str) -> str:
-        dev_path = self.replace_dev_path(dev_path)
-
-        _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
-        tmp_run = subprocess.run
-
         def nsenter_run(cmd, *args, **kwargs):
+            _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
             return tmp_run(_NSENTER + list(cmd), *args, **kwargs)
 
+        tmp_run = subprocess.run
         subprocess.run = nsenter_run
+        dev_path = self.replace_dev_path(dev_path)
         ret = super().mount(dev_path, serial)
         subprocess.run = tmp_run
         return ret
@@ -145,11 +144,10 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                 # seems like the device migrated to this node:
                 patch = {
                     "spec": {
+                        # Expect mountpoint and free(?) to change on a new node.
                         "node": self._node,
-                        # "manufacturer": device.manufacturer,
-                        # "model": device.model,
-                        # "type": device.type.value,
-                        # "partition": device.partition,
+                        "mountpoint": device.mountpoint,
+                        "free": device.free,
                     },
                 }
             # TODO - make this a CAS operation
@@ -175,6 +173,7 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
                     "type": device.type.value,
                     "partition": device.partition,
                     "free": device.free,
+                    "mountpoint": device.mountpoint,
                 },
             }
             self._api.create_cluster_custom_object(GROUP, VERSION, PLURAL, body)
