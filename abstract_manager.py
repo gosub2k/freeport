@@ -6,7 +6,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+class _ScFormatter(logging.Formatter):
+    def format(self, record):
+        if not hasattr(record, "sc"):
+            record.sc = "-"
+        return super().format(record)
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_ScFormatter("%(asctime)s %(levelname)s [%(sc)s] %(message)s"))
+logging.getLogger().addHandler(_handler)
+logging.getLogger().setLevel(logging.INFO)
 log = logging.getLogger("freeport")
 
 

@@ -178,7 +178,7 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager, Thread):
                     "name": name,
                 },
                 "spec": {
-                    "storageclass": self._sc.metadata.name,
+                    "class": self._sc.metadata.name,
                     "node": self._node,
                     "manufacturer": device.manufacturer,
                     "model": device.model,
