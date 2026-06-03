@@ -22,8 +22,6 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
     # effect on the host, so hostPath PV subdirs are visible to other pods.
     # _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
 
-    USB_DEVDIR = "/dev/disk/by-id"
-    SYS_CLASS_BLOCK = "/sys/class/block"
     # usb-...-partN only identifies a usb partition link and its number;
     # vendor / model / serial come from sysfs, not this name (the by-id name
     # mangles spaces to underscores and may carry an empty vendor field).
@@ -33,13 +31,14 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
 
     def __init__(self, filter: DeviceFilter) -> None:
         self._filter = filter
+        self._USB_DEVDIR = "/dev/disk/by-id"
+        self._SYS_CLASS_BLOCK = "/sys/class/block"
         self._known_devices: list[HostBlockDevice] = list()
         # what the "kernel" sees; injectable for tests, mutate to simulate
         # insertion / removal between reconcile() calls.
         self._system_devices: list[HostBlockDevice] = list()
 
-    @staticmethod
-    def get_df(dev_path: str) -> int:
+    def get_df(self, dev_path: str) -> int:
         try:
             st = os.statvfs(dev_path)
             df = st.f_bavail * st.f_frsize  # available to non-root
@@ -49,8 +48,7 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
             log.error(e)
             return 0
 
-    @staticmethod
-    def mount(dev_path: str, serial: str) -> str:
+    def mount(self, dev_path: str, serial: str) -> str:
         # mount the device onto the host so that we can later create sub dirs that can be
         # used in local or hostPath sources for PVs.
         mountpoint = f"/mnt/k8s-freeport-{serial}"
@@ -92,7 +90,7 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
         node is the nearest ancestor holding a `serial` file.
         """
         base = os.path.basename(device)
-        d = os.path.realpath(os.path.join(self.SYS_CLASS_BLOCK, base))
+        d = os.path.realpath(os.path.join(self._SYS_CLASS_BLOCK, base))
         while os.path.isdir(d):
             if os.path.exists(os.path.join(d, "serial")):
                 return d
@@ -108,9 +106,9 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
         devs: list[HostBlockDevice] = []
         pattern = re.compile(self.USB_REGEXP)
         try:
-            entries = os.listdir(self.USB_DEVDIR)
+            entries = os.listdir(self._USB_DEVDIR)
         except OSError:
-            log.warning("cannot read %s", self.USB_DEVDIR)
+            log.warning("cannot read %s", self._USB_DEVDIR)
             return devs
 
         for name in sorted(entries):
@@ -118,7 +116,7 @@ class InMemoryUSBDeviceManager(USBDeviceManager):
             if not m:
                 continue  # not a usb partition link
             partition = int(m.group(1))
-            device = os.path.realpath(os.path.join(self.USB_DEVDIR, name))
+            device = os.path.realpath(os.path.join(self._USB_DEVDIR, name))
 
             usb_node = self._usb_node_for(device)
             if usb_node is None:

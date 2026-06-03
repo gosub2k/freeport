@@ -13,6 +13,7 @@ get/list/create/patch/delete blockdevices.freeport.local.
 """
 
 import re
+import subprocess
 
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
@@ -77,12 +78,9 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
     ) -> None:
         self._filter = filter
         self._node = node_name
-        if usb_devdir:
-            self.USB_DEVDIR = usb_devdir
-        if sys_class_block:
-            self.SYS_CLASS_BLOCK = sys_class_block
-        if host_mount:
-            self.HOST_MOUNT = host_mount
+        self._USB_DEVDIR = usb_devdir or self._USB_DEVDIR
+        self._SYS_CLASS_BLOCK = sys_class_block or self._SYS_CLASS_BLOCK
+        self._HOST_MOUNT = host_mount or self._HOST_MOUNT
         # in_cluster: running as a pod (use the mounted ServiceAccount);
         # otherwise load the local ~/.kube/config (dev / out-of-cluster).
         if in_cluster:
@@ -90,6 +88,27 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager):
         else:
             config.load_kube_config()
         self._api = client.CustomObjectsApi()
+
+    def replace_dev_path(self, dev_path):
+        return re.sub(r"/mnt", self._HOST_MOUNT, dev_path)
+
+    def mount(self, dev_path: str, serial: str) -> str:
+        dev_path = self.replace_dev_path(dev_path)
+
+        _NSENTER = ["nsenter", "--target", "1", "--mount", "--"]
+        tmp_run = subprocess.run
+
+        def nsenter_run(cmd, *args, **kwargs):
+            return tmp_run(_NSENTER + list(cmd), *args, **kwargs)
+
+        subprocess.run = nsenter_run
+        ret = super().mount(dev_path, serial)
+        subprocess.run = tmp_run
+        return ret
+
+    def get_df(self, dev_path: str) -> int:
+        dev_path = self.replace_dev_path(dev_path)
+        return super().get_df(dev_path)
 
     # ---- known-device registry (backed by the cluster) ------------------- #
 
