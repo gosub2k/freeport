@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: freeport-csi-driver
+  namespace: dimsum
+spec:
+  selector:
+    matchLabels:
+      app: freeport-csi-driver
+  template:
+    metadata:
+      labels:
+        app: freeport-csi-driver
+    spec:
+      hostPID: true
+      terminationGracePeriodSeconds: 5
+      containers:
+
+        - name: csi-driver
+          image: localhost:32000/freeport-csi-driver:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+          args:
+            - --endpoint=unix:///var/lib/kubelet/plugins/local~freeport/csi.sock
+            - --nodeid=$(NODE_NAME)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /var/lib/kubelet/plugins/local~freeport
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+
+        # Registers the CSI driver with kubelet via the plugin registry.
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
+          args:
+            - --csi-address=/var/lib/kubelet/plugins/local~freeport/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/local~freeport/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /var/lib/kubelet/plugins/local~freeport
+            - name: registration-dir
+              mountPath: /registration
+
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/local~freeport
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory

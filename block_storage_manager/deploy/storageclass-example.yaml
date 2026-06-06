@@ -8,26 +8,23 @@
 #
 # Leave a field empty / omit it to match anything.
 #
-# provisioner must match MY_PROVISIOER in k8s_manager.py: local/freeport
+# provisioner must match the CSI driver name: local/freeport
+# StorageClasses are cluster-scoped — no namespace field.
 ---
-# Match by model — any USB disk whose sysfs product contains "DataTraveler".
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: freeport-generic
-  namespace: freeport
 provisioner: local/freeport
 parameters:
   model: "USB DISK 2.0"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
 ---
-# Match by serial allowlist — specific physical drives, any manufacturer.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: freeport-boutique
-  namespace: freeport
 provisioner: local/freeport
 parameters:
   manufacterer: "LaCie,SanDisk"
