@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: freeport-csi-driver
-  namespace: dimsum
+  namespace: freeport
 spec:
   selector:
     matchLabels:
@@ -22,7 +22,7 @@ spec:
           securityContext:
             privileged: true
           args:
-            - --endpoint=unix:///var/lib/kubelet/plugins/local~freeport/csi.sock
+            - --endpoint=unix:///var/lib/kubelet/plugins/local.freeport/csi.sock
             - --nodeid=$(NODE_NAME)
           env:
             - name: NODE_NAME
@@ -31,27 +31,30 @@ spec:
                   fieldPath: spec.nodeName
           volumeMounts:
             - name: plugin-dir
-              mountPath: /var/lib/kubelet/plugins/local~freeport
+              mountPath: /var/lib/kubelet/plugins/local.freeport
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
               mountPropagation: Bidirectional
+            - name: registration-dir
+              mountPath: /var/lib/kubelet/plugins_registry
 
         # Registers the CSI driver with kubelet via the plugin registry.
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
           args:
-            - --csi-address=/var/lib/kubelet/plugins/local~freeport/csi.sock
-            - --kubelet-registration-path=/var/lib/kubelet/plugins/local~freeport/csi.sock
+            - --csi-address=/var/lib/kubelet/plugins/local.freeport/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/local.freeport/csi.sock
           volumeMounts:
             - name: plugin-dir
-              mountPath: /var/lib/kubelet/plugins/local~freeport
+              mountPath: /var/lib/kubelet/plugins/local.freeport
             - name: registration-dir
-              mountPath: /registration
+              mountPath: /registration/local
 
       volumes:
+        # These are symlinks into snap dirs if this is microk8s
         - name: plugin-dir
           hostPath:
-            path: /var/lib/kubelet/plugins/local~freeport
+            path: /var/lib/kubelet/plugins/local.freeport
             type: DirectoryOrCreate
         - name: registration-dir
           hostPath:

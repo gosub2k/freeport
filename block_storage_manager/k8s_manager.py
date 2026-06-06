@@ -28,7 +28,7 @@ GROUP = "freeport.local"
 VERSION = "v1alpha1"
 PLURAL = "blockdevices"
 
-MY_PROVISIOER = "local/freeport"
+MY_PROVISIOER = "local.freeport"
 
 
 def _cr_name(serial: str) -> str:
