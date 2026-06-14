@@ -1,7 +1,7 @@
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
-  name: local.freeport
+  name: freeport.local
 spec:
   attachRequired: false      # local/USB storage — no attach/detach controller flow
   podInfoOnMount: false

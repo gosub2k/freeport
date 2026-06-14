@@ -6,3 +6,4 @@ for pod in $( kubectl get pods -n freeport --no-headers | grep csi | cut -d\  -f
   kubectl delete -n freeport pod $pod &
 done
 # for d in $(kubectl get bd --no-headers|cut -d \  -f 1); do kubectl delete bd $d; done
+echo

@@ -8,14 +8,14 @@
 #
 # Leave a field empty / omit it to match anything.
 #
-# provisioner must match the CSI driver name: local.freeport
-# StorageClasses are cluster-scoped — no namespace field.
+# provisioner must match the CSI driver name: freeport.local
+# # StorageClasses are cluster-scoped — no namespace field.
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: freeport-generic
-provisioner: local.freeport
+provisioner: freeport.local
 parameters:
   model: "USB DISK 2.0"
 volumeBindingMode: WaitForFirstConsumer
@@ -25,7 +25,7 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: freeport-boutique
-provisioner: local.freeport
+provisioner: freeport.local
 parameters:
   manufacterer: "LaCie,SanDisk"
 volumeBindingMode: WaitForFirstConsumer

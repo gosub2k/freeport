@@ -22,7 +22,7 @@ spec:
           securityContext:
             privileged: true
           args:
-            - --endpoint=unix:///var/lib/kubelet/plugins/local.freeport/csi.sock
+            - --endpoint=unix:///var/lib/kubelet/plugins/freeport.local/csi.sock
             - --nodeid=$(NODE_NAME)
           env:
             - name: NODE_NAME
@@ -31,7 +31,7 @@ spec:
                   fieldPath: spec.nodeName
           volumeMounts:
             - name: plugin-dir
-              mountPath: /var/lib/kubelet/plugins/local.freeport
+              mountPath: /var/lib/kubelet/plugins/freeport.local
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
               mountPropagation: Bidirectional
@@ -42,19 +42,19 @@ spec:
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
           args:
-            - --csi-address=/var/lib/kubelet/plugins/local.freeport/csi.sock
-            - --kubelet-registration-path=/var/lib/kubelet/plugins/local.freeport/csi.sock
+            - --csi-address=/var/lib/kubelet/plugins/freeport.local/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/freeport.local/csi.sock
           volumeMounts:
             - name: plugin-dir
-              mountPath: /var/lib/kubelet/plugins/local.freeport
+              mountPath: /var/lib/kubelet/plugins/freeport.local
             - name: registration-dir
-              mountPath: /registration/local
+              mountPath: /registration
 
       volumes:
         # These are symlinks into snap dirs if this is microk8s
         - name: plugin-dir
           hostPath:
-            path: /var/lib/kubelet/plugins/local.freeport
+            path: /var/lib/kubelet/plugins/freeport.local
             type: DirectoryOrCreate
         - name: registration-dir
           hostPath:

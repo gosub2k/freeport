@@ -1,0 +1,49 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: test-csi-driver
+spec:
+  volumes:
+    - name: scratch-volume
+      metadata:
+        labels:
+          type: foobar
+      accessModes: [ "ReadWriteOnce" ]
+      spec:
+        storageClassName: "freeport-generic"
+      resources:
+        requests:
+          storage: 1Gi
+  containers:
+    - name: test-script
+      image: busybox
+      command: [ "sh", "-c", "echo hello > /data/hello.txt && if [[ $(cat /data/hello.txt) = hello ]]; then echo 'read and write to volume worked!'; else exit 1; fi"]
+      volumeMounts:
+      - mountPath: "/data"
+        name: scratch-volume
+---
+# apiVersion: v1
+# kind: PersistentVolume
+# metadata:
+#   name: my-csi-volume
+# spec:
+#   accessModes: [ "ReadWriteOnce" ]
+#   capacity:
+#     storage: 1Gi
+#   csi:
+#     storageClassName: freeport-generic
+#   # resources:
+  #   requests:
+  #     storage: 1Gi
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-csi-volume
+spec:
+  storageClassName: freeport-generic
+  accessModes:
+  - ReadWriteOnce  # NFS supports multiple writers!
+  resources:
+    requests:
+      storage: 2Gi
+
