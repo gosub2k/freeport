@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: freeport-csi-controller
+  namespace: freeport
+  labels:
+    app: freeport-csi-controller
+spec:
+  replicas: 1 # Leader election allows scaling this later for HA
+  selector:
+    matchLabels:
+      app: freeport-csi-controller
+  template:
+    metadata:
+      labels:
+        app: freeport-csi-controller
+    spec:
+      containers:
+        - name: csi-controller
+          image: localhost:32000/freeport-csi-controller:latest
+          args:
+          #  - "--v=5"
+            - "--endpoint=$(CSI_ENDPOINT)"
+            # Your driver handles leader election internally if replicas > 1
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///socketdir/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /socketdir/
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: 500m
+
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v3.6.0
+          args:
+            - "--v=5"
+            - "--csi-address=$(CSI_ENDPOINT)"
+            - "--leader-election=true"
+            - "--leader-election-namespace=kube-system"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///socketdir/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /socketdir/
+
+          # REVISIT: can add resizer and snapshotter here
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

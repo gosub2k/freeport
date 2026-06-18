@@ -1,0 +1,13 @@
+FROM golang:1.26-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY pkg pkg
+COPY cmd cmd
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o csi-controller ./cmd/controller
+
+FROM alpine:3.21
+# mount/umount needed for NodePublishVolume/NodeUnpublishVolume
+RUN apk add --no-cache util-linux
+COPY --from=builder /src/csi-controller /csi-controller
+ENTRYPOINT ["/csi-controller"]

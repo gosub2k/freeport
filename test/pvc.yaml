@@ -1,0 +1,32 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: test-csi-driver-pvc
+spec:
+
+  volumes:
+    - name: scratch-pv
+      persistentVolumeClaim:
+        claimName: scratch-pvc
+
+  containers:
+    - name: test-script
+      image: busybox
+      command: [ "sh", "-c", "echo hello > /data/hello.txt && if [[ $(cat /data/hello.txt) = hello ]]; then echo 'read and write to volume worked!'; else exit 1; fi"]
+      volumeMounts:
+      - mountPath: "/data"
+        name: scratch-pv
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scratch-pvc
+spec:
+  storageClassName: freeport-generic
+  accessModes:
+  - ReadWriteOnce  # NFS supports multiple writers!
+  resources:
+    requests:
+      storage: 2Gi
+

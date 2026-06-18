@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
-	"log/slog"
 	"net"
 	"os"
+
+	"freeport/pkg/driver"
+	"freeport/pkg/util"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
@@ -17,8 +19,6 @@ var (
 	version  = flag.String("version", "0.1.0", "Driver version")
 )
 
-var log = slog.Default()
-
 func main() {
 	flag.Parse()
 	sock := (*endpoint)[7:] // strip "unix://"
@@ -26,15 +26,15 @@ func main() {
 
 	lis, err := net.Listen("unix", sock)
 	if err != nil {
-		log.Error("failed to listen", "socket", sock, "err", err)
+		util.Log.Error("failed to listen", "socket", sock, "err", err)
 		os.Exit(1)
 	}
 
-	log.Info("starting", "driver", *name, "version", *version, "node", *nodeID, "socket", sock)
+	util.Log.Info("starting", "driver", *name, "version", *version, "node", *nodeID, "socket", sock)
 
 	server := grpc.NewServer()
-	csi.RegisterIdentityServer(server, NewIdentityServer(*name, *version))
-	csi.RegisterNodeServer(server, NewNodeServer(*nodeID))
+	csi.RegisterIdentityServer(server, driver.NewIdentityServer(*name, *version))
+	csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID))
 
 	server.Serve(lis)
 }

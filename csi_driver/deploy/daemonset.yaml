@@ -32,12 +32,15 @@ spec:
           volumeMounts:
             - name: plugin-dir
               mountPath: /var/lib/kubelet/plugins/freeport.local
+            - name: registration-dir
+              mountPath: /var/lib/kubelet/plugins_registry
+            - name: host-root
+              mountPath: /host
+              mountPropagation: Bidirectional
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
               mountPropagation: Bidirectional
-            - name: registration-dir
-              mountPath: /var/lib/kubelet/plugins_registry
-
+            
         # Registers the CSI driver with kubelet via the plugin registry.
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
@@ -63,4 +66,8 @@ spec:
         - name: pods-mount-dir
           hostPath:
             path: /var/lib/kubelet/pods
+            type: Directory
+        - name: host-root
+          hostPath:
+            path: /
             type: Directory

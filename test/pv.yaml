@@ -1,0 +1,16 @@
+#CreateVolume NOT called
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: scratch-vol-explici-create
+spec:
+  capacity:
+    storage: 1Gi
+  # volumeMode: Filesystem
+  accessModes:
+  - ReadWriteOnce
+  csi:
+    driver: freeport.local
+    volumeHandle: foobar # assumes this exists
+  storageClassName: freeport-generic
+

@@ -28,7 +28,7 @@ GROUP = "freeport.local"
 VERSION = "v1alpha1"
 PLURAL = "blockdevices"
 
-MY_PROVISIOER = "local.freeport"
+MY_PROVISIOER = "freeport.local"  # must match storage class everywhere
 
 
 def _cr_name(serial: str) -> str:
@@ -167,7 +167,9 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager, Thread):
             # TODO - make this a CAS operation
             self._api.patch_cluster_custom_object(GROUP, VERSION, PLURAL, name, patch)
             prev_node = existing.get("spec").get("node", "")
-            self.log.info("BlockDevice updated (node %s -> %s): %s", prev_node, self._node, device)
+            self.log.info(
+                "BlockDevice updated (node %s -> %s): %s", prev_node, self._node, device
+            )
             return True
 
         else:
@@ -210,13 +212,16 @@ class K8sUSBDeviceManager(InMemoryUSBDeviceManager, Thread):
         if existing.get("spec").get("node") != self._node:
             self.log.info(
                 "not deleting BlockDevice %s: belongs to node %s, not us (%s)",
-                name, existing.get("spec").get("node"), self._node,
+                name,
+                existing.get("spec").get("node"),
+                self._node,
             )
             return False
         if existing.get("spec").get("class") != self._sc.metadata.name:
             self.log.info(
                 "not deleting BlockDevice %s: belongs to SC %s, not us",
-                name, existing.get("spec").get("class"),
+                name,
+                existing.get("spec").get("class"),
             )
             return False
 
