@@ -23,7 +23,7 @@ type ControllerServer struct {
 // CreateVolume is the core logic for your request.
 // It receives the topology selected by the K8s Scheduler and echoes it back.
 func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	util.Log.Info("CreateVolume called: name=%s, capacity=%v", req.Name, req.CapacityRange)
+	util.Log.Info("CreateVolume called: ", "name", req.Name, "capacity", req.CapacityRange)
 
 	// 1. Validate
 	if len(req.Name) == 0 {
@@ -77,6 +77,8 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 
 // ControllerGetCapabilities is required
 func (cs *ControllerServer) ControllerGetCapabilities(ctx context.Context, req *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
+	util.Log.Info("ControllerGetCapabilities called")
+
 	return &csi.ControllerGetCapabilitiesResponse{
 		Capabilities: []*csi.ControllerServiceCapability{
 			{

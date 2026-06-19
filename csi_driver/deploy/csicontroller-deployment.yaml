@@ -44,8 +44,8 @@ spec:
             - "--v=3"
             - "--csi-address=$(CSI_ENDPOINT)"
             # REVISIT: it 
-            - "--leader-election=true"
-            - "--leader-election-namespace=kube-system"
+            #- "--leader-election=true"
+            #- "--leader-election-namespace=kube-system"
           env:
             - name: CSI_ENDPOINT
               value: unix:///socketdir/csi.sock

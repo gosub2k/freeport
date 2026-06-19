@@ -12,7 +12,7 @@ spec:
   containers:
     - name: test-script
       image: busybox
-      command: [ "sh", "-c", "echo hello > /data/hello.txt && if [[ $(cat /data/hello.txt) = hello ]]; then echo 'read and write to volume worked!'; else exit 1; fi"]
+      command: [ "sh", "-c", "echo hello > /data/hello.txt && if [[ $(cat /data/hello.txt) = hello ]]; then echo 'read and write to volume worked!'; sleep 300; else exit 1; fi"]
       volumeMounts:
       - mountPath: "/data"
         name: scratch-pv

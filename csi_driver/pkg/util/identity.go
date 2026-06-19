@@ -2,8 +2,8 @@ package util
 
 import (
 	"context"
+
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 type IdentityServer struct {
@@ -27,8 +27,9 @@ func (ids *IdentityServer) GetPluginInfo(ctx context.Context, req *csi.GetPlugin
 }
 
 func (ids *IdentityServer) GetPluginCapabilities(ctx context.Context, req *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
-	Log.Info("GetPluginCapabilities")
 	caps := []*csi.PluginCapability{}
+	Log.Info("GetPluginCapabilities", "isController", ids.isController)
+
 	if ids.isController {
 		caps = append(caps, &csi.PluginCapability{
 			Type: &csi.PluginCapability_Service_{
@@ -37,14 +38,21 @@ func (ids *IdentityServer) GetPluginCapabilities(ctx context.Context, req *csi.G
 				},
 			},
 		})
-		caps = append(caps, &csi.PluginCapability{
-			Type: &
-		})
+		// caps = append(caps, &csi.PluginCapability{
+		// 	Type: &csi.PluginCapability_Service_{
+		// 		Service: &csi.PluginCapability_Service{
+		// 			Type: csi.PluginCapability_Service_Type(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME),
+		// 		},
+		// 	},
+		// })
 	}
+
 	return &csi.GetPluginCapabilitiesResponse{Capabilities: caps}, nil
 }
 
-func (ids *IdentityServer) Probe(ctx context.Context, req *csi.ProbeRequest) (*csi.ProbeResponse, error) {
-	Log.Info("Probe")
-	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
+func (i *IdentityServer) Probe(
+	ctx context.Context,
+	req *csi.ProbeRequest,
+) (*csi.ProbeResponse, error) {
+	return &csi.ProbeResponse{}, nil
 }
