@@ -17,8 +17,11 @@ echome "redeploy"
 kubectl delete -f deploy/
 kubectl apply -f deploy/
 echome "deleting stuff inside pods so that they will not hang on deletion if driver broken"
+# hack
 sudo find /var/snap/microk8s/common/var/lib/kubelet/pods -type f -name hello.txt -exec rm -v {} \;
-ssh hiyashi "sudo find /var/snap/microk8s/common/var/lib/kubelet/pods -type f -name hello.txt -exec rm -v {} \;"
+if [[ ! -z "$OTHER_HOST" ]]; then
+  ssh $OTHER_HOST "iudo find /var/snap/microk8s/common/var/lib/kubelet/pods -type f -name hello.txt -exec rm -v {} \;"
+fi
 echome "cleanup prev pods"
 for pod in $( kubectl get pods -n freeport --no-headers | grep test-csi | cut -d\  -f 1); do
   #kubectl exec "$pod" -- sh -c '[ -d /data ] && rm -fv /data/hello.txt'

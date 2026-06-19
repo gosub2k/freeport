@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	SocketPath = "unix:///socketdir/csi.sock"
-	DriverName = "csi-local-minimal"
+	DriverName = "freeport"
 )
 
 type ControllerServer struct {

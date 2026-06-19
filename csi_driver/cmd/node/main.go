@@ -33,7 +33,7 @@ func main() {
 	util.Log.Info("starting", "driver", *name, "version", *version, "node", *nodeID, "socket", sock)
 
 	server := grpc.NewServer()
-	csi.RegisterIdentityServer(server, driver.NewIdentityServer(*name, *version))
+	csi.RegisterIdentityServer(server, util.NewIdentityServer(*name, *version, false))
 	csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID))
 
 	server.Serve(lis)

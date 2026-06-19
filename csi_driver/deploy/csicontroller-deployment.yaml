@@ -6,7 +6,7 @@ metadata:
   labels:
     app: freeport-csi-controller
 spec:
-  replicas: 1 # Leader election allows scaling this later for HA
+  replicas: 1 # Leader election allows scaling this later 
   selector:
     matchLabels:
       app: freeport-csi-controller
@@ -18,13 +18,13 @@ spec:
       containers:
         - name: csi-controller
           image: localhost:32000/freeport-csi-controller:latest
-          args:
+          args: 
           #  - "--v=5"
             - "--endpoint=$(CSI_ENDPOINT)"
             # Your driver handles leader election internally if replicas > 1
           env:
             - name: CSI_ENDPOINT
-              value: unix:///socketdir/csi.sock
+              value: /socketdir/csi.sock
           volumeMounts:
             - name: socket-dir
               mountPath: /socketdir/
@@ -32,12 +32,18 @@ spec:
             limits:
               memory: 512Mi
               cpu: 500m
+          readinessProbe:
+            exec:
+              command: ["test", "-S", "/socketdir/csi.sock"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
 
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v3.6.0
           args:
-            - "--v=5"
+            - "--v=3"
             - "--csi-address=$(CSI_ENDPOINT)"
+            # REVISIT: it 
             - "--leader-election=true"
             - "--leader-election-namespace=kube-system"
           env:
