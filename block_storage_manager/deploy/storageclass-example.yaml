@@ -18,6 +18,7 @@ metadata:
 provisioner: freeport.local
 parameters:
   model: "USB DISK 2.0"
+  storageClassName: "freeport-generic"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
 ---
@@ -28,5 +29,6 @@ metadata:
 provisioner: freeport.local
 parameters:
   manufacterer: "LaCie,SanDisk"
+  storageClassName: "freeport-boutique"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
