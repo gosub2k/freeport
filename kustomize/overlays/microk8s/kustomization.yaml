@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: freeport
+
+resources:
+  - ../../base
+
+images:
+  - name: localhost:32000/freeport-csi-controller
+    newName: ghcr.io/YOUR_ORG/freeport-csi-controller
+    newTag: v1.2.3
+  - name: localhost:32000/freeport-csi-driver
+    newName: ghcr.io/YOUR_ORG/freeport-csi-driver
+    newTag: v1.2.3
+  - name: localhost:32000/freeport-provisioner
+    newName: ghcr.io/YOUR_ORG/freeport-provisioner
+    newTag: v1.2.3
