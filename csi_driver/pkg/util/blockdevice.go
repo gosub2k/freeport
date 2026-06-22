@@ -38,7 +38,7 @@ func getKubeConfig() (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
-func GetAvailableDevices(ctx context.Context) ([]BlockDevice, error) {
+func GetAvailableDevices(ctx context.Context, desiredStorageClass string) ([]BlockDevice, error) {
 	cfg, err := getKubeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get kube config: %w", err)
@@ -63,15 +63,23 @@ func GetAvailableDevices(ctx context.Context) ([]BlockDevice, error) {
 		serial, _, _ := unstructured.NestedString(obj.Object, "spec", "serial")
 		class, _, _ := unstructured.NestedString(obj.Object, "spec", "class")
 		free, _, _ := unstructured.NestedInt64(obj.Object, "spec", "free")
+		// REVISIT: use parameters.storageClass for consistency semantic
+		// deviceStorageClass, ok, _ := unstructured.NestedString(obj.Object, "spec", "parameters.storageClassName")
+		// if !ok {
+		// 	Log.Error("No storage class found: ", "serial", serial)
+		// }
+		deviceStorageClass := class
 
-		devices = append(devices, BlockDevice{
-			Name:       obj.GetName(),
-			Node:       node,
-			MountPoint: mountpoint,
-			Serial:     serial,
-			Class:      class,
-			Free:       free,
-		})
+		if deviceStorageClass == desiredStorageClass {
+			devices = append(devices, BlockDevice{
+				Name:       obj.GetName(),
+				Node:       node,
+				MountPoint: mountpoint,
+				Serial:     serial,
+				Class:      class,
+				Free:       free,
+			})
+		}
 	}
 
 	return devices, nil

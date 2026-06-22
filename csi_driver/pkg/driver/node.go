@@ -27,7 +27,9 @@ func NewNodeServer(nodeID string) *NodeServer {
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
 	targetPath := filepath.Join("/host", req.GetTargetPath())
-	util.Log.Info("NodePublishVolume", "node", ns.nodeID, "volumeID", volumeID, "targetPath", targetPath)
+	storageClass := ""
+	storageClass, _ = req.VolumeContext["storageClassName"]
+	util.Log.Info("NodePublishVolume", "node", ns.nodeID, "volumeID", volumeID, "targetPath", targetPath, "storageClass", storageClass)
 
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
@@ -35,8 +37,11 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if targetPath == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
+	if storageClass == "" {
+		return nil, status.Error(codes.InvalidArgument, "storageClassName is required in the volumeContext")
+	}
 
-	devices, err := util.GetAvailableDevices(ctx)
+	devices, err := util.GetAvailableDevices(ctx, storageClass)
 	if err != nil {
 		util.Log.Error("failed to get available devices", "err", err)
 		return nil, status.Errorf(codes.Internal, "failed to get available devices: %v", err)
@@ -114,11 +119,11 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 }
 
 func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
-	util.Log.Info("NodeGetInfo", "nodeID", ns.nodeID)
+	util.Log.Debug("NodeGetInfo", "nodeID", ns.nodeID)
 	return &csi.NodeGetInfoResponse{NodeId: ns.nodeID}, nil
 }
 
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
-	util.Log.Info("NodeGetCapabilities")
+	util.Log.Debug("NodeGetCapabilities")
 	return &csi.NodeGetCapabilitiesResponse{}, nil
 }

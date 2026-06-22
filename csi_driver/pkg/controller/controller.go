@@ -53,6 +53,14 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		util.Log.Info("Warning: No accessibility requirements provided in request.")
 	}
 
+	// 3.5 ...
+	// Need to get the storage class. Currently the storage class of devices is managed outside this pkg.
+	storageClass := ""
+	storageClass, ok := req.Parameters["storageClassName"]
+	if !ok {
+		util.Log.Error("No storage class name found in request", "volumeId", volumeID, "name", req.Name)
+	}
+
 	// 4. Construct Response
 	// CRITICAL: We return 'accessible_topology' matching the input.
 	// The external-provisioner reads this and sets spec.nodeAffinity on the PV.
@@ -62,10 +70,11 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 			CapacityBytes: req.CapacityRange.GetRequiredBytes(),
 			// This is the magic field that binds the PV to the Node
 			AccessibleTopology: []*csi.Topology{selectedTopology},
+			VolumeContext:      map[string]string{"storageClassName": storageClass},
 		},
 	}
 
-	util.Log.Info("Created volume %s with topology %v", volumeID, selectedTopology)
+	util.Log.Info("Created volume:", "id", volumeID, "topology", selectedTopology)
 	return resp, nil
 }
 
