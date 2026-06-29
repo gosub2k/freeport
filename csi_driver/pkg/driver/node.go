@@ -49,6 +49,8 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 	util.Log.Info("fetched available devices", "total", len(devices))
 
+	/////////////////////////
+	// TODO: replace with topology matching in volumecontext
 	var nodeDevices []util.BlockDevice
 	for _, d := range devices {
 		if d.Node == ns.nodeID {
@@ -67,6 +69,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	})
 	dev := nodeDevices[0]
 	util.Log.Info("selected device", "name", dev.Name, "mountpoint", dev.MountPoint)
+	/////////////////////////
 
 	volPath := filepath.Join(ns.hostRoot, dev.MountPoint, volumeID)
 	util.Log.Info("ensuring volume directory exists", "path", volPath)
@@ -133,6 +136,10 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	util.Log.Debug("NodeGetInfo", "nodeID", ns.nodeID)
+
+	// TODO:
+	// return Segments for the topology
+
 	return &csi.NodeGetInfoResponse{NodeId: ns.nodeID}, nil
 }
 
@@ -140,3 +147,6 @@ func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetC
 	util.Log.Debug("NodeGetCapabilities")
 	return &csi.NodeGetCapabilitiesResponse{}, nil
 }
+
+// TODO:
+// NodeGetInfo to scan host root for block devices, add them

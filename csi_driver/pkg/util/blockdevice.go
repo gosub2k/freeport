@@ -1,5 +1,8 @@
 package util
 
+/////////////////////////
+/// TODO: remove - no more blockdevice crd
+
 import (
 	"context"
 	"fmt"
@@ -37,6 +40,10 @@ func getKubeConfig() (*rest.Config, error) {
 	kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
+
+	/////////////////////////
+/// TODO:  do stuff on the node to look for the devices - make it a part of NodeServer to get the HOST_ROOT context
+
 
 func GetAvailableDevices(ctx context.Context, desiredStorageClass string) ([]BlockDevice, error) {
 	cfg, err := getKubeConfig()
@@ -84,3 +91,4 @@ func GetAvailableDevices(ctx context.Context, desiredStorageClass string) ([]Blo
 
 	return devices, nil
 }
+
