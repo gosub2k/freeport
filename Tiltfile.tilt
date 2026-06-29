@@ -2,7 +2,7 @@
 
 CTRL_REF = "localhost:32000/freeport-csi-controller:latest"
 NODE_REF = "localhost:32000/freeport-csi-driver:latest"
-PROV_REF = "localhost:32000/freeport-provisioner:latest"
+# PROV_REF = "localhost:32000/freeport-provisioner:latest"
 
 # Set BUILDX_PLATFORMS=linux/amd64,linux/arm64 to enable multi-arch buildx builds
 buildx_platforms = os.environ.get('BUILDX_PLATFORMS', '')
@@ -36,11 +36,11 @@ def make_build(ref, context, dockerfile, deps):
 
 make_build(CTRL_REF, 'csi_driver',            'csi_driver/Dockerfile.controller',  ['csi_driver'])
 make_build(NODE_REF, 'csi_driver',            'csi_driver/Dockerfile.node',         ['csi_driver'])
-make_build(PROV_REF, 'block_storage_manager', 'block_storage_manager/Dockerfile',   ['block_storage_manager'])
+# make_build(PROV_REF, 'block_storage_manager', 'block_storage_manager/Dockerfile',   ['block_storage_manager'])
 
 kustomize_yaml = kustomize('kustomize/base')
 k8s_yaml(kustomize_yaml)
 
 k8s_resource(workload='freeport-csi-controller', port_forwards=[])
 k8s_resource(workload='freeport-csi-driver',     port_forwards=[])
-k8s_resource(workload='freeport-manager',        port_forwards=[])
+# k8s_resource(workload='freeport-manager',        port_forwards=[])

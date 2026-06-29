@@ -16,14 +16,15 @@ import (
 
 type NodeServer struct {
 	csi.UnimplementedNodeServer
-	hostRoot string
-	nodeID   string
+	hostRoot   string
+	nodeID     string
+	driverName string
 }
 
-func NewNodeServer(nodeID, hostRoot string) *NodeServer {
+func NewNodeServer(nodeID, hostRoot, driverName string) *NodeServer {
 	util.Log.Info("NewNodeServer", "nodeID", nodeID)
 
-	return &NodeServer{nodeID: nodeID, hostRoot: hostRoot}
+	return &NodeServer{nodeID: nodeID, hostRoot: hostRoot, driverName: driverName}
 }
 
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -42,36 +43,23 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.InvalidArgument, "storageClassName is required in the volumeContext")
 	}
 
-	devices, err := util.GetAvailableDevices(ctx, storageClass)
-	if err != nil {
-		util.Log.Error("failed to get available devices", "err", err)
-		return nil, status.Errorf(codes.Internal, "failed to get available devices: %v", err)
-	}
-	util.Log.Info("fetched available devices", "total", len(devices))
+	scanned := scanUSBDevices(ns.hostRoot)
+	util.Log.Info("scanned devices", "total", len(scanned))
 
-	/////////////////////////
-	// TODO: replace with topology matching in volumecontext
-	var nodeDevices []util.BlockDevice
-	for _, d := range devices {
-		if d.Node == ns.nodeID {
-			nodeDevices = append(nodeDevices, d)
-		}
+	candidates := matchVolumeContext(scanned, ns.driverName, req.VolumeContext)
+	if len(candidates) == 0 {
+		util.Log.Error("no matching block devices on node", "node", ns.nodeID)
+		return nil, status.Errorf(codes.ResourceExhausted, "no matching block devices on node %s", ns.nodeID)
 	}
+	util.Log.Info("matched devices", "count", len(candidates))
 
-	if len(nodeDevices) == 0 {
-		util.Log.Error("no block devices available on node", "node", ns.nodeID)
-		return nil, status.Errorf(codes.ResourceExhausted, "no block devices available on node %s", ns.nodeID)
-	}
-	util.Log.Info("devices on this node", "count", len(nodeDevices))
-
-	sort.Slice(nodeDevices, func(i, j int) bool {
-		return nodeDevices[i].Name < nodeDevices[j].Name
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].serial < candidates[j].serial
 	})
-	dev := nodeDevices[0]
-	util.Log.Info("selected device", "name", dev.Name, "mountpoint", dev.MountPoint)
-	/////////////////////////
+	dev := candidates[0]
+	util.Log.Info("selected device", "serial", dev.serial, "mountpoint", dev.mountpoint)
 
-	volPath := filepath.Join(ns.hostRoot, dev.MountPoint, volumeID)
+	volPath := filepath.Join(ns.hostRoot, dev.mountpoint, volumeID)
 	util.Log.Info("ensuring volume directory exists", "path", volPath)
 	if err := os.MkdirAll(volPath, 0750); err != nil {
 		util.Log.Error("failed to create volume directory", "path", volPath, "err", err)
@@ -137,10 +125,46 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	util.Log.Debug("NodeGetInfo", "nodeID", ns.nodeID)
 
-	// TODO:
-	// return Segments for the topology
+	devices := scanUSBDevices(ns.hostRoot)
+	segments := map[string]string{}
+	for _, dev := range devices {
+		if v := labelValue("serial-", dev.serial); v != "" {
+			segments[ns.driverName+"/"+v] = "true"
+		}
+		if v := labelValue("model-", dev.model); v != "" {
+			segments[ns.driverName+"/"+v] = "true"
+		}
+		if v := labelValue("manufacturer-", dev.manufacturer); v != "" {
+			segments[ns.driverName+"/"+v] = "true"
+		}
+		// type is an enum value — use key=value (not boolean key)
+		segments[ns.driverName+"/type"] = "usb"
+	}
 
-	return &csi.NodeGetInfoResponse{NodeId: ns.nodeID}, nil
+	for _, dev := range devices {
+		util.Log.Info(dev.String())
+	}
+	resp := &csi.NodeGetInfoResponse{NodeId: ns.nodeID}
+	if len(segments) > 0 {
+		resp.AccessibleTopology = &csi.Topology{Segments: segments}
+	}
+
+	return resp, nil
+}
+
+// labelValue builds a sanitized label key suffix like "model-samsung" from a
+// prefix and a raw sysfs value. Returns "" if the value is empty. The combined
+// prefix+value is capped at 63 characters (Kubernetes label name limit).
+func labelValue(prefix, raw string) string {
+	v := sanitize(raw)
+	if v == "" {
+		return ""
+	}
+	suffix := prefix + v
+	if len(suffix) > 63 {
+		suffix = suffix[:63]
+	}
+	return suffix
 }
 
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {

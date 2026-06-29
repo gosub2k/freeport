@@ -4,6 +4,5 @@ resources:
   - csicontroller-deployment.yaml
   - csidriver.yaml
   - csinode-daemonset.yaml
-  - manager-daemonset.yaml
   - namespace.yaml
   - storageclass-example.yaml

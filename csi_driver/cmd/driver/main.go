@@ -39,7 +39,7 @@ func main() {
 
 	server := grpc.NewServer()
 	csi.RegisterIdentityServer(server, util.NewIdentityServer(*name, *version, false))
-	csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID, hostRoot))
+	csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID, hostRoot, *name))
 
 	server.Serve(lis)
 }

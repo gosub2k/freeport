@@ -60,7 +60,7 @@ func TestMyDriver(t *testing.T) {
 
 		server := grpc.NewServer()
 		csi.RegisterIdentityServer(server, util.NewIdentityServer(*name, *version, false))
-		csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID, ""))
+		csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID, "", *name))
 		csi.RegisterControllerServer(server, &controller.ControllerServer{}) // Needs controller server or even -ginko.focus="NodeGetInfo" fail
 
 		server.Serve(lis)
