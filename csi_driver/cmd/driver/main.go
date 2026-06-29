@@ -17,6 +17,7 @@ var (
 	nodeID   = flag.String("nodeid", "", "Node ID")
 	name     = flag.String("name", "freeport.local", "Driver name")
 	version  = flag.String("version", "0.1.0", "Driver version")
+	hostRoot = os.Getenv("HOST_ROOT")
 )
 
 func main() {
@@ -32,9 +33,13 @@ func main() {
 
 	util.Log.Info("starting", "driver", *name, "version", *version, "node", *nodeID, "socket", sock)
 
+	if hostRoot == "" {
+		util.Log.Info("HOST_ROOT not set")
+	}
+
 	server := grpc.NewServer()
 	csi.RegisterIdentityServer(server, util.NewIdentityServer(*name, *version, false))
-	csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID))
+	csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID, hostRoot))
 
 	server.Serve(lis)
 }

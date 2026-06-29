@@ -16,19 +16,20 @@ import (
 
 type NodeServer struct {
 	csi.UnimplementedNodeServer
-	nodeID string
+	hostRoot string
+	nodeID   string
 }
 
-func NewNodeServer(nodeID string) *NodeServer {
+func NewNodeServer(nodeID, hostRoot string) *NodeServer {
 	util.Log.Info("NewNodeServer", "nodeID", nodeID)
-	return &NodeServer{nodeID: nodeID}
+
+	return &NodeServer{nodeID: nodeID, hostRoot: hostRoot}
 }
 
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
-	targetPath := filepath.Join("/host", req.GetTargetPath())
-	storageClass := ""
-	storageClass, _ = req.VolumeContext["storageClassName"]
+	targetPath := filepath.Join(ns.hostRoot, req.GetTargetPath())
+	storageClass, storageClassIsSet := req.VolumeContext["storageClassName"]
 	util.Log.Info("NodePublishVolume", "node", ns.nodeID, "volumeID", volumeID, "targetPath", targetPath, "storageClass", storageClass)
 
 	if volumeID == "" {
@@ -37,7 +38,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if targetPath == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
-	if storageClass == "" {
+	if !storageClassIsSet {
 		return nil, status.Error(codes.InvalidArgument, "storageClassName is required in the volumeContext")
 	}
 
@@ -67,7 +68,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	dev := nodeDevices[0]
 	util.Log.Info("selected device", "name", dev.Name, "mountpoint", dev.MountPoint)
 
-	volPath := filepath.Join("/host", dev.MountPoint, volumeID)
+	volPath := filepath.Join(ns.hostRoot, dev.MountPoint, volumeID)
 	util.Log.Info("ensuring volume directory exists", "path", volPath)
 	if err := os.MkdirAll(volPath, 0750); err != nil {
 		util.Log.Error("failed to create volume directory", "path", volPath, "err", err)
@@ -96,7 +97,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
-	targetPath := filepath.Join("/host", req.GetTargetPath())
+	targetPath := req.GetTargetPath()
 
 	util.Log.Info("NodeUnpublishVolume", "node", ns.nodeID, "volumeID", volumeID, "targetPath", targetPath)
 
@@ -104,14 +105,26 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
 
+	if volumeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	}
+
+	targetPath = filepath.Join(ns.hostRoot, req.GetTargetPath())
 	util.Log.Info("unmounting target path", "path", targetPath)
 	if err := syscall.Unmount(targetPath, 0); err != nil {
 		if err == syscall.ENOENT || err == syscall.EINVAL {
-			util.Log.Info("target already unmounted or not a mount point, returning idempotent success", "path", targetPath)
-			return &csi.NodeUnpublishVolumeResponse{}, nil
+			util.Log.Info("target already unmounted or not a mount point, ignoring", "path", targetPath)
+			//return &csi.NodeUnpublishVolumeResponse{}, nil
+		} else {
+			util.Log.Error("unmount failed", "path", targetPath, "err", err)
+			return nil, status.Errorf(codes.Internal, "unmount %s failed: %v", targetPath, err)
 		}
-		util.Log.Error("unmount failed", "path", targetPath, "err", err)
-		return nil, status.Errorf(codes.Internal, "unmount %s failed: %v", targetPath, err)
+	}
+	pathToRm := targetPath
+	util.Log.Info("removing target path", "path", pathToRm)
+	if err := os.RemoveAll(pathToRm); err != nil {
+		util.Log.Error("remove failed", "path", pathToRm, "err", err)
+		return nil, status.Errorf(codes.Internal, "'remove' (rename) %s failed: %v", pathToRm, err)
 	}
 
 	util.Log.Info("NodeUnpublishVolume succeeded", "volumeID", volumeID, "targetPath", targetPath)

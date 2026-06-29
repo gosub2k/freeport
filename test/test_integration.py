@@ -14,6 +14,9 @@ BLOCKDEVICE_GROUP = "freeport.local"
 BLOCKDEVICE_VERSION = "v1alpha1"
 BLOCKDEVICE_PLURAL = "blockdevices"
 
+# String to check logs for failure
+FAIL_STR="__FAIL__"
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -45,7 +48,7 @@ def make_pvc(name, namespace, storage_class=STORAGE_CLASS, storage="1Gi"):
             access_modes=["ReadWriteOnce"],
             storage_class_name=storage_class,
             resources=client.V1ResourceRequirements(
-                requests={"storage": storage}
+                requests={"storage": storage},
             ),
         ),
     )
@@ -90,7 +93,7 @@ def make_container(name, command, read_only=False):
     )
 
 
-def wait_for_pvc_bound(pvc_name, namespace, timeout=60):
+def wait_for_pvc_bound(pvc_name, namespace, timeout=30):
     """Wait for PVC to reach Bound phase. Returns pv_name or raises."""
     start = time.time()
     while time.time() - start < timeout:
@@ -103,14 +106,24 @@ def wait_for_pvc_bound(pvc_name, namespace, timeout=60):
     raise TimeoutError(f"PVC {pvc_name} not bound within {timeout}s — check CSI controller logs")
 
 
-def wait_for_pod_container_log(pod_name, namespace, container, expected, timeout=30):
+def wait_and_check_pod_container_log(pod_name, namespace, container, expected, timeout=30):
     """Wait until container log contains expected string. Returns log string or raises."""
     start = time.time()
     while time.time() - start < timeout:
         try:
             logs = v1_api.read_namespaced_pod_log(pod_name, namespace, container=container)
-            if logs and expected in logs:
-                return logs.strip()
+            if logs:
+                # WTF
+                for line in logs.splitlines():
+                    if isinstance(line, bytes):
+                        for bline in str(line).splitlines():
+                            print(f'{pod_name}: {bline}')
+                    else:
+                        print(f'{pod_name}: {line}')
+                if expected in logs:
+                    return logs.strip()
+                if FAIL_STR in logs:
+                    raise Exception(f"Container {container} log contained {FAIL_STR}")
         except ApiException:
             pass
         time.sleep(2)
@@ -230,6 +243,14 @@ def namespace():
     yield ns_name
     v1_api.delete_namespace(ns_name)
 
+def get_nodes():
+    nodes = get_nodes_with_class(STORAGE_CLASS)
+    assert nodes, f"No BlockDevices found with class={STORAGE_CLASS!r} — is the CRD populated?"
+    return nodes
+
+@pytest.fixture(params=get_nodes())
+def node(request: pytest.FixtureRequest):
+    return request.param
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -307,7 +328,7 @@ class TestCSIProvisioning:
             assert_pv_valid(pv_name, pvc_name, namespace)
             print(f"✓ PVC bound to PV {pv_name}")
 
-            log = wait_for_pod_container_log(pod_name, namespace, "reader", "hello-from-writer")
+            log = wait_and_check_pod_container_log(pod_name, namespace, "reader", "hello-from-writer")
             print(f"✓ Reader saw: {log!r}")
 
         finally:
@@ -315,119 +336,97 @@ class TestCSIProvisioning:
             cleanup_pvc_pv(pvc_name, pv_name, namespace)
 
 
-    def test_volume_on_each_node_with_blockdevice(self, namespace):
+    def test_volume_on_each_node_with_blockdevice(self, namespace, node):
             """
             Discover all nodes that have a BlockDevice matching the StorageClass,
             then create a PVC+pod pinned to each node and verify it binds.
             """
-            nodes = get_nodes_with_class(STORAGE_CLASS)
-            assert nodes, f"No BlockDevices found with class={STORAGE_CLASS!r} — is the CRD populated?"
-            print(f"✓ Found {len(nodes)} node(s) with matching BlockDevice: {nodes}")
-
+            node_name = node
             failures = []
-            for node_name in nodes:
-                ts = int(time.time())
-                pvc_name = f"test-pvc-node-{ts}"
-                pod_name = f"test-pod-node-{ts}"
-                pv_name = None
+            ts = int(time.time())
+            pvc_name = f"test-pvc-node-{ts}"
+            pod_name = f"test-pod-node-{ts}"
+            pv_name = None
 
-                print(f"\n→ Testing node {node_name}")
-                try:
-                    v1_api.create_namespaced_persistent_volume_claim(
-                        namespace, make_pvc(pvc_name, namespace)
-                    )
+            print(f"\n→ Testing node {node_name}")
+            try:
+                v1_api.create_namespaced_persistent_volume_claim(
+                    namespace, make_pvc(pvc_name, namespace)
+                )
 
-                    pod = make_pod(
-                        pod_name, namespace, pvc_name,
-                        node_name=node_name,
-                        containers=[
-                            make_container("sleeper", "sleep 3600"),
-                        ],
-                    )
-                    v1_api.create_namespaced_pod(namespace, pod)
+                pod = make_pod(
+                    pod_name, namespace, pvc_name,
+                    node_name=node_name,
+                    containers=[
+                        make_container("sleeper", "sleep 3600"),
+                    ],
+                )
+                v1_api.create_namespaced_pod(namespace, pod)
 
-                    pv_name = wait_for_pvc_bound(pvc_name, namespace, timeout=60)
-                    assert_pv_valid(pv_name, pvc_name, namespace)
-                    print(f"  ✓ Node {node_name}: PV {pv_name} bound")
+                pv_name = wait_for_pvc_bound(pvc_name, namespace, timeout=30)
+                assert_pv_valid(pv_name, pvc_name, namespace)
+                print(f"  ✓ Node {node_name}: PV {pv_name} bound")
 
-                except Exception as e:
-                    failures.append(f"node {node_name}: {e}")
-                    print(f"  ✗ Node {node_name}: {e}")
+            except Exception as e:
+                failures.append(f"node {node_name}: {e}")
+                print(f"  ✗ Node {node_name}: {e}")
 
-                finally:
-                    cleanup_pod(pod_name, namespace)
-                    cleanup_pvc_pv(pvc_name, pv_name, namespace)
-                
-                # small gap between nodes to let cleanup settle
-                time.sleep(2)
-
-            assert not failures, "Failed on some nodes:\n" + "\n".join(failures)
+            finally:
+                cleanup_pod(pod_name, namespace)
+                cleanup_pvc_pv(pvc_name, pv_name, namespace)
+            
+            # small gap between nodes to let cleanup settle
+            time.sleep(2)
 
 
-    # def test_volume_mounted_on_separate_device(self, namespace):
-    #     """
-    #     Verify the CSI volume is a real block device mount, not just a directory
-    #     on the root filesystem. Checks that /mnt/test has a different device/fstype
-    #     than /.
-    #     """
-    #     ts = int(time.time())
-    #     pvc_name = f"test-pvc-dev-{ts}"
-    #     pod_name = f"test-pod-dev-{ts}"
-    #     pv_name = None
+    def test_volume_on_each_node_mounted_on_separate_device(self, namespace, node):
+        """
+        Verify the CSI volume is a real block device mount, not just a directory
+        on the root filesystem. Checks that /mnt/test has a different device/fstype
+        than /.
+        """
+        ts = int(time.time())
+        pvc_name = f"test-pvc-dev-{ts}"
+        pod_name = f"test-pod-dev-{ts}"
+        pv_name = None
 
-    #     try:
-    #         v1_api.create_namespaced_persistent_volume_claim(namespace, make_pvc(pvc_name, namespace))
+        try:
+            v1_api.create_namespaced_persistent_volume_claim(namespace, make_pvc(pvc_name, namespace))
 
-    #         # df -P prints: Filesystem  Blocks  Used  Available  Use%  Mounted on
-    #         # We grab the Filesystem (device) column for both / and /mnt/test
-    #         # and also the filesystem type via /proc/mounts
-    #         check_script = """
-    #             root_dev=$(df -P / | awk 'NR==2{print $1}')
-    #             vol_dev=$(df -P /mnt/test | awk 'NR==2{print $1}')
-    #             root_fs=$(awk '$2=="/" {print $3}' /proc/mounts | tail -1)
-    #             vol_fs=$(awk '$2=="/mnt/test" {print $3}' /proc/mounts | tail -1)
-    #             echo "root_dev=$root_dev"
-    #             echo "vol_dev=$vol_dev"
-    #             echo "root_fs=$root_fs"
-    #             echo "vol_fs=$vol_fs"
-    #             if [ "$root_dev" = "$vol_dev" ]; then
-    #                 echo "FAIL: same device as root"
-    #                 exit 1
-    #             fi
-    #             echo "OK"
-    #         """
+            # df -P prints: Filesystem  Blocks  Used  Available  Use%  Mounted on
+            # We grab the Filesystem (device) column for both / and /mnt/test
+            # and also the filesystem type via /proc/mounts
+            check_script = f"""
+                root_dev=$(df -P / | awk 'NR==2{{print $1}}')
+                vol_dev=$(df -P /mnt/test | awk 'NR==2{{print $1}}')
+                echo "root_dev=$root_dev"
+                echo "vol_dev=$vol_dev"
+                if [[ $root_dev == $vol_dev ]]; then
+                  echo {FAIL_STR}
+                  exit 1
+                fi
+                echo OK  # needed for wait_for_container log function
+            """
 
-    #         pod = make_pod(
-    #             pod_name, namespace, pvc_name,
-    #             containers=[
-    #                 make_container("checker", check_script, read_only=False),
-    #             ],
-    #         )
-    #         v1_api.create_namespaced_pod(namespace, pod)
-    #         print(f"✓ Pod {pod_name} created")
+            pod = make_pod(
+                pod_name, namespace, pvc_name,
+                containers=[
+                    make_container("checker", check_script, read_only=False),
+                ],
+                node_name=node
+            )
+            v1_api.create_namespaced_pod(namespace, pod)
+            print(f"✓ Pod {pod_name} created")
 
-    #         pv_name = wait_for_pvc_bound(pvc_name, namespace)
-    #         assert_pv_valid(pv_name, pvc_name, namespace)
-    #         print(f"✓ PVC bound to PV {pv_name}")
+            pv_name = wait_for_pvc_bound(pvc_name, namespace)
+            assert_pv_valid(pv_name, pvc_name, namespace)
+            print(f"✓ PVC bound to PV {pv_name}")
 
-    #         # Wait for checker to finish and print OK
-    #         log = wait_for_pod_container_log(pod_name, namespace, "checker", "OK", timeout=60)
-    #         print(f"✓ Device check passed:\n  {chr(10).join(log.splitlines())}")
+            wait_and_check_pod_container_log(pod_name, namespace, "checker", "OK", timeout=30)
 
-    #         # Parse out the values for nicer assertions
-    #         info = dict(line.split("=", 1) for line in log.splitlines() if "=" in line)
-    #         assert info.get("vol_dev") not in (None, ""), "Could not determine volume device"
-    #         assert info.get("vol_fs") not in (None, ""), "Could not determine volume filesystem"
-    #         assert info["root_dev"] != info["vol_dev"], (
-    #             f"Volume is on same device as root ({info['root_dev']}) — "
-    #             "node plugin may not have mounted a real block device"
-    #         )
-    #         print(f"  root: {info['root_dev']} ({info['root_fs']})")
-    #         print(f"  vol:  {info['vol_dev']} ({info['vol_fs']})")
-
-    #     finally:
-    #         cleanup_pod(pod_name, namespace)
-    #         cleanup_pvc_pv(pvc_name, pv_name, namespace)
+        finally:
+            cleanup_pod(pod_name, namespace)
+            cleanup_pvc_pv(pvc_name, pv_name, namespace)
 
     
     # def test_volume_is_usb_block_device(self, namespace):
@@ -533,7 +532,7 @@ class TestCSIProvisioning:
     #         assert_pv_valid(pv_name, pvc_name, namespace)
     #         print(f"✓ PVC bound to PV {pv_name}")
 
-    #         log = wait_for_pod_container_log(pod_name, namespace, "checker", "OK", timeout=60)
+    #         log = wait_and_check_pod_container_log(pod_name, namespace, "checker", "OK", timeout=60)
     #         print(f"✓ USB check passed:\n  " + "\n  ".join(log.splitlines()))
 
     #     finally:
