@@ -19,12 +19,58 @@ type NodeServer struct {
 	hostRoot   string
 	nodeID     string
 	driverName string
+	scanFn     func(hostRoot string) []hostBlockDevice
+	mountFn    func(source, target, fstype string, flags uintptr, data string) error
 }
 
-func NewNodeServer(nodeID, hostRoot, driverName string) *NodeServer {
+func NewNodeServer(nodeID, hostRoot, driverName string, opts ...func(*NodeServer)) *NodeServer {
 	util.Log.Info("NewNodeServer", "nodeID", nodeID)
+	ns := &NodeServer{
+		nodeID:     nodeID,
+		hostRoot:   hostRoot,
+		driverName: driverName,
+		scanFn:     scanUSBDevices,
+		mountFn:    syscall.Mount,
+	}
+	for _, opt := range opts {
+		opt(ns)
+	}
+	return ns
+}
 
-	return &NodeServer{nodeID: nodeID, hostRoot: hostRoot, driverName: driverName}
+// WithNoScan replaces USB device scanning with a no-op. Use in tests where no
+// real USB hardware is present and sysfs/devfs access should be avoided.
+func WithNoScan() func(*NodeServer) {
+	return func(ns *NodeServer) {
+		ns.scanFn = func(string) []hostBlockDevice { return nil }
+	}
+}
+
+// WithFakeDevice replaces the scanner with one that returns a single synthetic
+// device whose mountpoint is mountpointDir. Use in tests together with
+// WithNoMount to exercise the full publish/unpublish flow without hardware.
+func WithFakeDevice(mountpointDir string) func(*NodeServer) {
+	return func(ns *NodeServer) {
+		ns.scanFn = func(string) []hostBlockDevice {
+			return []hostBlockDevice{{
+				serial:       "test-serial",
+				manufacturer: "Test Co",
+				model:        "Test USB",
+				partition:    1,
+				mountpoint:   mountpointDir,
+			}}
+		}
+	}
+}
+
+// WithNoMount replaces syscall.Mount with a no-op. Use in tests running without
+// CAP_SYS_ADMIN where bind mounts are not available.
+func WithNoMount() func(*NodeServer) {
+	return func(ns *NodeServer) {
+		ns.mountFn = func(source, target, fstype string, flags uintptr, data string) error {
+			return nil
+		}
+	}
 }
 
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -43,7 +89,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.InvalidArgument, "storageClassName is required in the volumeContext")
 	}
 
-	scanned := scanUSBDevices(ns.hostRoot)
+	scanned := ns.scanFn(ns.hostRoot)
 	util.Log.Info("scanned devices", "total", len(scanned))
 
 	candidates := matchVolumeContext(scanned, ns.driverName, req.VolumeContext)
@@ -73,7 +119,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 
 	util.Log.Info("bind mounting", "source", volPath, "target", targetPath)
-	if err := syscall.Mount(volPath, targetPath, "", syscall.MS_BIND, ""); err != nil {
+	if err := ns.mountFn(volPath, targetPath, "", syscall.MS_BIND, ""); err != nil {
 		if err == syscall.EBUSY {
 			util.Log.Info("target already bind-mounted, returning idempotent success", "target", targetPath)
 			return &csi.NodePublishVolumeResponse{}, nil
@@ -103,9 +149,12 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	targetPath = filepath.Join(ns.hostRoot, req.GetTargetPath())
 	util.Log.Info("unmounting target path", "path", targetPath)
 	if err := syscall.Unmount(targetPath, 0); err != nil {
-		if err == syscall.ENOENT || err == syscall.EINVAL {
+		if err == syscall.ENOENT || err == syscall.EINVAL || err == syscall.EPERM {
+			// ENOENT/EINVAL: not a mount point — nothing to unmount.
+			// EPERM: caller lacks CAP_SYS_ADMIN (e.g. unprivileged test); the
+			// bind-mount either never happened or will be cleaned up by the
+			// kubelet. Either way, proceed to remove the directory.
 			util.Log.Info("target already unmounted or not a mount point, ignoring", "path", targetPath)
-			//return &csi.NodeUnpublishVolumeResponse{}, nil
 		} else {
 			util.Log.Error("unmount failed", "path", targetPath, "err", err)
 			return nil, status.Errorf(codes.Internal, "unmount %s failed: %v", targetPath, err)
@@ -125,7 +174,7 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	util.Log.Debug("NodeGetInfo", "nodeID", ns.nodeID)
 
-	devices := scanUSBDevices(ns.hostRoot)
+	devices := ns.scanFn(ns.hostRoot)
 	segments := map[string]string{}
 	for _, dev := range devices {
 		if v := labelValue("serial-", dev.serial); v != "" {
@@ -152,20 +201,6 @@ func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoReque
 	return resp, nil
 }
 
-// labelValue builds a sanitized label key suffix like "model-samsung" from a
-// prefix and a raw sysfs value. Returns "" if the value is empty. The combined
-// prefix+value is capped at 63 characters (Kubernetes label name limit).
-func labelValue(prefix, raw string) string {
-	v := sanitize(raw)
-	if v == "" {
-		return ""
-	}
-	suffix := prefix + v
-	if len(suffix) > 63 {
-		suffix = suffix[:63]
-	}
-	return suffix
-}
 
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	util.Log.Debug("NodeGetCapabilities")

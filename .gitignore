@@ -5,3 +5,4 @@ __pycache__/
 .env
 scrap_bits_and_pieces
 START_TILT.sh
+TEST.sh
