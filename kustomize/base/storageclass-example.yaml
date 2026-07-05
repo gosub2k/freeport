@@ -1,15 +1,24 @@
 # Sample StorageClass for the freeport USB provisioner.
 #
-# Match criteria live in `parameters`. All set fields must pass:
-#   manufacturer  - sysfs manufacturer string (regex, see DeviceFilter)
-#   model         - sysfs product string (regex or comma-separated list)
-#   serial        - exact serial or comma-separated allowlist
-#   type          - usb | nvme
+# Device matching is done entirely through topology, not parameters. Each
+# node advertises one accessible-topology segment per USB device it finds,
+# keyed as:
 #
-# Leave a field empty / omit it to match anything.
+#   freeport.local/<manufacturer>-<model>=true
+#
+# (manufacturer/model are lowercased and sanitized by the node driver; a
+# missing value falls back to "unknown"). A StorageClass picks the exact
+# device class it wants via allowedTopologies — no regex, no globbing, one
+# key per class. Combining more than one freeport.local/* key in a single
+# matchLabelExpressions entry is an AND and will never match, since a device
+# only ever carries one class key; use a separate StorageClass (or a
+# separate term) per device class instead.
+#
+# storageClassName is still a required parameter — it's how the provisioner
+# threads the StorageClass name through CreateVolume into the volume context.
 #
 # provisioner must match the CSI driver name: freeport.local
-# # StorageClasses are cluster-scoped — no namespace field.
+# StorageClasses are cluster-scoped — no namespace field.
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -17,18 +26,24 @@ metadata:
   name: freeport-generic
 provisioner: freeport.local
 parameters:
-  model: "USB DISK 2.0"
   storageClassName: "freeport-generic"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: freeport.local/generic-usb-disk-2.0
+        values: ["true"]
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: freeport-boutique
+  name: freeport-sandisk
 provisioner: freeport.local
 parameters:
-  manufacterer: "LaCie,SanDisk"
-  storageClassName: "freeport-boutique"
+  storageClassName: "freeport-sandisk"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: freeport.local/sandisk-cruzer
+        values: ["true"]

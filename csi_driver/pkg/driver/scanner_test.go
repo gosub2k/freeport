@@ -56,61 +56,47 @@ func TestMatchVolumeContext(t *testing.T) {
 			wantSerials: []string{"SN123", "SN456"},
 		},
 		{
-			name:        "type=usb matches all devices",
-			vc:          map[string]string{"freeport.io/type": "usb"},
-			wantSerials: []string{"SN123", "SN456"},
-		},
-		{
-			name:        "type=nfs matches no devices",
-			vc:          map[string]string{"freeport.io/type": "nfs"},
-			wantSerials: nil,
-		},
-		{
-			// sanitize("SN123") = "sn123"
-			name:        "serial key selects single device",
-			vc:          map[string]string{"freeport.io/serial-sn123": "true"},
+			// deviceClassKey("Acme", "USB Drive") = "acme-usb-drive"
+			name:        "class key selects single device",
+			vc:          map[string]string{"freeport.io/acme-usb-drive": "true"},
 			wantSerials: []string{"SN123"},
 		},
 		{
-			// sanitize("USB Drive") = "usb-drive"
-			name:        "model key selects single device",
-			vc:          map[string]string{"freeport.io/model-usb-drive": "true"},
-			wantSerials: []string{"SN123"},
-		},
-		{
-			// sanitize("Acme") = "acme"
-			name:        "manufacturer key selects single device",
-			vc:          map[string]string{"freeport.io/manufacturer-acme": "true"},
-			wantSerials: []string{"SN123"},
-		},
-		{
-			// manufacturer matches SN123, but serial-sn456 does not — AND logic → no match
-			name: "all constraints must hold (AND semantics)",
-			vc: map[string]string{
-				"freeport.io/manufacturer-acme": "true",
-				"freeport.io/serial-sn456":      "true",
-			},
-			wantSerials: nil,
-		},
-		{
-			// type=usb + serial narrows from all to one
-			name: "type and serial together narrow to one device",
-			vc: map[string]string{
-				"freeport.io/type":          "usb",
-				"freeport.io/serial-sn456":  "true",
-			},
+			// deviceClassKey("Generic", "Flash Drive") = "generic-flash-drive"
+			name:        "different class key selects the other device",
+			vc:          map[string]string{"freeport.io/generic-flash-drive": "true"},
 			wantSerials: []string{"SN456"},
+		},
+		{
+			name:        "unknown class key matches no devices",
+			vc:          map[string]string{"freeport.io/nonexistent-vendor": "true"},
+			wantSerials: nil,
+		},
+		{
+			name:        "value other than true matches no devices",
+			vc:          map[string]string{"freeport.io/acme-usb-drive": "false"},
+			wantSerials: nil,
+		},
+		{
+			// A device can only ever have one class key, so two driver-prefixed
+			// keys can never both match a single device.
+			name: "two distinct driver keys match nothing (AND semantics)",
+			vc: map[string]string{
+				"freeport.io/acme-usb-drive":     "true",
+				"freeport.io/generic-flash-drive": "true",
+			},
+			wantSerials: nil,
 		},
 		{
 			// Keys without the driver prefix must be silently ignored
 			name:        "non-driver prefix keys are ignored",
-			vc:          map[string]string{"kubernetes.io/hostname": "node1", "freeport.io/type": "usb"},
+			vc:          map[string]string{"kubernetes.io/hostname": "node1"},
 			wantSerials: []string{"SN123", "SN456"},
 		},
 		{
 			// A different CSI driver's key should not affect matching
 			name:        "wrong driver prefix is ignored — all devices match",
-			vc:          map[string]string{"othercsi.io/serial-sn123": "true"},
+			vc:          map[string]string{"othercsi.io/acme-usb-drive": "true"},
 			wantSerials: []string{"SN123", "SN456"},
 		},
 	}
@@ -226,50 +212,66 @@ func TestUsbNodeFor(t *testing.T) {
 	})
 }
 
-func TestLabelValue(t *testing.T) {
+func TestDeviceClassKey(t *testing.T) {
 	tests := []struct {
-		name   string
-		prefix string
-		raw    string
-		want   string
+		name         string
+		manufacturer string
+		model        string
+		want         string
 	}{
-		{"empty raw returns empty", "serial-", "", ""},
-		{"raw that sanitizes to empty returns empty", "serial-", "---", ""},
-		{"basic concatenation", "model-", "Samsung", "model-samsung"},
-		{"raw sanitized before concat", "model-", "My Drive!", "model-my-drive"},
+		{"basic concatenation", "Acme", "USB Drive", "acme-usb-drive"},
+		{"raw sanitized before concat", "My Co!", "Drive 2.0", "my-co-drive-2.0"},
+		{"missing manufacturer falls back to unknown", "", "USB Drive", "unknown-usb-drive"},
+		{"missing model falls back to unknown", "Acme", "", "acme-unknown"},
+		{"both missing fall back to unknown", "", "", "unknown-unknown"},
+		{"manufacturer that sanitizes to empty falls back", "---", "USB Drive", "unknown-usb-drive"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := labelValue(tt.prefix, tt.raw)
+			got := deviceClassKey(tt.manufacturer, tt.model)
 			if got != tt.want {
-				t.Errorf("labelValue(%q, %q) = %q, want %q", tt.prefix, tt.raw, got, tt.want)
+				t.Errorf("deviceClassKey(%q, %q) = %q, want %q", tt.manufacturer, tt.model, got, tt.want)
 			}
-			if len(got) > 63 {
-				t.Errorf("result length %d exceeds 63", len(got))
+			if len(got) > deviceClassNameLimit {
+				t.Errorf("result length %d exceeds %d", len(got), deviceClassNameLimit)
 			}
 		})
 	}
 
-	t.Run("exactly 63 chars is not truncated", func(t *testing.T) {
-		// "serial-" (7) + 56 'a's = 63 — must survive unchanged.
-		prefix := "serial-"
-		raw := strings.Repeat("a", 56)
-		got := labelValue(prefix, raw)
-		if len(got) != 63 {
-			t.Errorf("expected length 63, got %d: %q", len(got), got)
-		}
-		if got != prefix+raw {
-			t.Errorf("got %q, want %q", got, prefix+raw)
+	t.Run("combined length within budget is not truncated", func(t *testing.T) {
+		// 31 + 1 (sep) + 31 = 63 — must survive unchanged.
+		m := strings.Repeat("a", 31)
+		d := strings.Repeat("b", 31)
+		got := deviceClassKey(m, d)
+		want := m + "-" + d
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
 		}
 	})
 
-	t.Run("over 63 chars is truncated to 63", func(t *testing.T) {
-		// "serial-" (7) + 57 'a's = 64 — must be capped at 63.
-		prefix := "serial-"
-		raw := strings.Repeat("a", 57)
-		got := labelValue(prefix, raw)
-		if len(got) != 63 {
-			t.Errorf("expected length 63, got %d: %q", len(got), got)
+	t.Run("over-budget names are split evenly", func(t *testing.T) {
+		m := strings.Repeat("a", 50)
+		d := strings.Repeat("b", 50)
+		got := deviceClassKey(m, d)
+		if len(got) > deviceClassNameLimit {
+			t.Errorf("result length %d exceeds %d: %q", len(got), deviceClassNameLimit, got)
+		}
+		parts := strings.SplitN(got, "-", 2)
+		if len(parts) != 2 {
+			t.Fatalf("expected exactly one separator, got %q", got)
+		}
+		if diff := len(parts[0]) - len(parts[1]); diff < -1 || diff > 1 {
+			t.Errorf("halves differ by more than 1 char: %d vs %d", len(parts[0]), len(parts[1]))
+		}
+	})
+
+	t.Run("short manufacturer leaves model most of the budget", func(t *testing.T) {
+		m := "a"
+		d := strings.Repeat("b", 70)
+		got := deviceClassKey(m, d)
+		want := m + "-" + strings.Repeat("b", deviceClassNameLimit-len(m)-1)
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
 		}
 	})
 }

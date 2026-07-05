@@ -49,52 +49,53 @@ func sanitize(s string) string {
 	return strings.Trim(b.String(), "-_.")
 }
 
-// labelValue builds a sanitized label key suffix like "model-samsung" from a
-// prefix and a raw sysfs value. Returns "" if the value is empty. The combined
-// prefix+value is capped at 63 characters (Kubernetes label name limit).
-func labelValue(prefix, raw string) string {
-	v := sanitize(raw)
-	if v == "" {
-		return ""
+// deviceClassNameLimit is the Kubernetes label-name length limit (63 chars),
+// which topology keys and volume-context attribute names must also satisfy.
+const deviceClassNameLimit = 63
+
+// deviceClassKey builds the canonical "<manufacturer>-<model>" topology name
+// for a device, e.g. "sandisk-cruzer". A missing manufacturer or model is
+// replaced with "unknown" rather than collapsing into a bare separator. If
+// the combined length would exceed deviceClassNameLimit, both halves are
+// truncated to an even split so neither one starves the other.
+func deviceClassKey(manufacturer, model string) string {
+	m := sanitize(manufacturer)
+	if m == "" {
+		m = "unknown"
 	}
-	suffix := prefix + v
-	if len(suffix) > 63 {
-		suffix = suffix[:63]
+	d := sanitize(model)
+	if d == "" {
+		d = "unknown"
 	}
-	return suffix
+
+	const sep = "-"
+	budget := deviceClassNameLimit - len(sep)
+	if len(m)+len(d) > budget {
+		half := budget / 2
+		m = m[:min(len(m), half)]
+		d = d[:min(len(d), budget-len(m))]
+		m = strings.TrimRight(m, "-_.")
+		d = strings.TrimRight(d, "-_.")
+	}
+	return m + sep + d
 }
 
-// matchVolumeContext returns the subset of devices that satisfy every topology
-// segment in vc whose key starts with driverName+"/". Keys are expected in the
-// form "<driverName>/serial-<val>=true", "<driverName>/model-<val>=true",
-// "<driverName>/manufacturer-<val>=true", or "<driverName>/type=<val>".
+// matchVolumeContext returns the subset of devices whose "<manufacturer>-<model>"
+// class key satisfies every topology segment in vc whose key starts with
+// driverName+"/". Segments are expected in the form
+// "<driverName>/<manufacturer>-<model>=true".
 func matchVolumeContext(devices []hostBlockDevice, driverName string, vc map[string]string) []hostBlockDevice {
 	prefix := driverName + "/"
 	var matched []hostBlockDevice
 	for _, dev := range devices {
+		classKey := deviceClassKey(dev.manufacturer, dev.model)
 		ok := true
 		for k, v := range vc {
 			if !strings.HasPrefix(k, prefix) {
 				continue
 			}
-			attr := k[len(prefix):]
-			switch {
-			case attr == "type":
-				if v != "usb" {
-					ok = false
-				}
-			case strings.HasPrefix(attr, "serial-"):
-				if sanitize(dev.serial) != attr[len("serial-"):] {
-					ok = false
-				}
-			case strings.HasPrefix(attr, "model-"):
-				if sanitize(dev.model) != attr[len("model-"):] {
-					ok = false
-				}
-			case strings.HasPrefix(attr, "manufacturer-"):
-				if sanitize(dev.manufacturer) != attr[len("manufacturer-"):] {
-					ok = false
-				}
+			if k[len(prefix):] != classKey || v != "true" {
+				ok = false
 			}
 			if !ok {
 				break

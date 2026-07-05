@@ -177,17 +177,7 @@ func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoReque
 	devices := ns.scanFn(ns.hostRoot)
 	segments := map[string]string{}
 	for _, dev := range devices {
-		if v := labelValue("serial-", dev.serial); v != "" {
-			segments[ns.driverName+"/"+v] = "true"
-		}
-		if v := labelValue("model-", dev.model); v != "" {
-			segments[ns.driverName+"/"+v] = "true"
-		}
-		if v := labelValue("manufacturer-", dev.manufacturer); v != "" {
-			segments[ns.driverName+"/"+v] = "true"
-		}
-		// type is an enum value — use key=value (not boolean key)
-		segments[ns.driverName+"/type"] = "usb"
+		segments[ns.driverName+"/"+deviceClassKey(dev.manufacturer, dev.model)] = "true"
 	}
 
 	for _, dev := range devices {
@@ -200,7 +190,6 @@ func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoReque
 
 	return resp, nil
 }
-
 
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	util.Log.Debug("NodeGetCapabilities")
