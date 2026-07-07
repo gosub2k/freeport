@@ -12,6 +12,7 @@ spec:
       labels:
         name: freeport-manager
     spec:
+      serviceAccountName: freeport-manager
       tolerations:
       # these tolerations are to have the daemonset runnable on control plane nodes
       # remove them if your control plane nodes should not run pods
@@ -25,10 +26,12 @@ spec:
       hostPID: true
       containers:
       - name: freeport-manager
-        image: localhost:32000/freeport-provisioner:latest
+        image: localhost:32000/freeport-manager:latest
         imagePullPolicy: Always
         securityContext:
           privileged: true
+        args:
+          - --nodename=$(NODE_NAME)
         resources:
           limits:
             memory: 200Mi
@@ -36,37 +39,18 @@ spec:
             cpu: 100m
             memory: 200Mi
         env:
-        - name: SYS_CLASS_BLOCK
-          value: /sys/class/block
-        - name: USB_DEVDIR
-          value: /dev/disk/by-id
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        # REVISIT: if its ok to just use /mnt
-        - name: HOST_MOUNT
-          value: /host-mount
+        - name: HOST_ROOT
+          value: "/host"
         volumeMounts:
-        - name: host-dev 
-          mountPath: /dev
-        - name: host-sys
-          mountPath: /sys
-        - name: host-mnt
-          mountPath: /host-mount
-        # - name: host-proc
-          # mountPath: /proc
+        - name: host-root
+          mountPath: /host
+          mountPropagation: Bidirectional
       volumes:
-      - name: host-dev 
+      - name: host-root
         hostPath:
-          path: /dev
-      - name: host-sys
-        hostPath:
-          path: /sys
-      - name: host-mnt
-        hostPath:
-          path: /mnt
-      # NOTE: /proc/mounts on host looks different from in container?
-      # - name: host-proc
-      #   hostPath:
-      #     path: /proc
+          path: /
+          type: Directory

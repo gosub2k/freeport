@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"freeport/pkg/devicescan"
 	"freeport/pkg/util"
 )
 
@@ -29,7 +30,7 @@ func NewNodeServer(nodeID, hostRoot, driverName string, opts ...func(*NodeServer
 		nodeID:     nodeID,
 		hostRoot:   hostRoot,
 		driverName: driverName,
-		scanFn:     scanUSBDevices,
+		scanFn:     scanReadyDevices,
 		mountFn:    syscall.Mount,
 	}
 	for _, opt := range opts {
@@ -177,7 +178,7 @@ func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoReque
 	devices := ns.scanFn(ns.hostRoot)
 	segments := map[string]string{}
 	for _, dev := range devices {
-		segments[ns.driverName+"/"+deviceClassKey(dev.manufacturer, dev.model)] = "true"
+		segments[ns.driverName+"/"+devicescan.DeviceClassKey(dev.manufacturer, dev.model)] = "true"
 	}
 
 	for _, dev := range devices {
@@ -195,6 +196,3 @@ func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetC
 	util.Log.Debug("NodeGetCapabilities")
 	return &csi.NodeGetCapabilitiesResponse{}, nil
 }
-
-// TODO:
-// NodeGetInfo to scan host root for block devices, add them

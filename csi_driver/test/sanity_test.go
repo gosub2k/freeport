@@ -47,7 +47,7 @@ func startDriver(t *testing.T, nodeOpts ...func(*driver.NodeServer)) sanity.Test
 		server := grpc.NewServer()
 		csi.RegisterIdentityServer(server, util.NewIdentityServer(*name, *version, false))
 		csi.RegisterNodeServer(server, driver.NewNodeServer(*nodeID, "", *name, nodeOpts...))
-		csi.RegisterControllerServer(server, controller.NewControllerServer())
+		csi.RegisterControllerServer(server, controller.NewControllerServer(*name))
 		server.Serve(lis)
 	}()
 

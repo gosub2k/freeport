@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"freeport/pkg/util"
@@ -15,7 +16,7 @@ import (
 const DriverName = "freeport"
 
 type volumeRecord struct {
-	id           string
+	id            string
 	capacityBytes int64
 	storageClass  string
 	topology      *csi.Topology
@@ -24,15 +25,17 @@ type volumeRecord struct {
 
 type ControllerServer struct {
 	csi.UnimplementedControllerServer
-	mu     sync.Mutex
-	byName map[string]*volumeRecord // idempotency key
-	byID   map[string]*volumeRecord // for ValidateVolumeCapabilities / DeleteVolume
+	mu         sync.Mutex
+	driverName string
+	byName     map[string]*volumeRecord // idempotency key
+	byID       map[string]*volumeRecord // for ValidateVolumeCapabilities / DeleteVolume
 }
 
-func NewControllerServer() *ControllerServer {
+func NewControllerServer(driverName string) *ControllerServer {
 	return &ControllerServer{
-		byName: make(map[string]*volumeRecord),
-		byID:   make(map[string]*volumeRecord),
+		driverName: driverName,
+		byName:     make(map[string]*volumeRecord),
+		byID:       make(map[string]*volumeRecord),
 	}
 }
 
@@ -72,12 +75,26 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 	storageClass := req.Parameters["storageClassName"]
 
+	// The scheduler's chosen device-class segment (e.g.
+	// "freeport.local/sandisk-cruzer=true") is forwarded into VolumeContext
+	// so NodePublishVolume can disambiguate if a node has more than one
+	// device class mounted.
+	volumeContext := map[string]string{"storageClassName": storageClass}
+	if selectedTopology != nil {
+		prefix := cs.driverName + "/"
+		for k, v := range selectedTopology.GetSegments() {
+			if strings.HasPrefix(k, prefix) {
+				volumeContext[k] = v
+			}
+		}
+	}
+
 	rec := &volumeRecord{
-		id:           volumeID,
+		id:            volumeID,
 		capacityBytes: capacityBytes,
 		storageClass:  storageClass,
 		topology:      selectedTopology,
-		context:       map[string]string{"storageClassName": storageClass},
+		context:       volumeContext,
 	}
 	cs.byName[req.Name] = rec
 	cs.byID[volumeID] = rec

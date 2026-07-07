@@ -43,7 +43,7 @@ func main() {
 	}
 
 	server := grpc.NewServer()
-	csi.RegisterControllerServer(server, controller.NewControllerServer())
+	csi.RegisterControllerServer(server, controller.NewControllerServer(*name))
 	csi.RegisterIdentityServer(server, util.NewIdentityServer(*name, *version, true))
 
 	//	csi.RegisterIdentityServer(server, controller.)
