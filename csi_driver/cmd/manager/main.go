@@ -18,7 +18,7 @@ import (
 var (
 	nodeName          = flag.String("nodename", os.Getenv("NODE_NAME"), "Node name")
 	name              = flag.String("name", "freeport.local", "Driver name")
-	reconcileInterval = flag.Duration("reconcile-interval", 30*time.Second, "How often to rescan devices and reconcile node labels")
+	reconcileInterval = flag.Duration("reconcile-interval", 15*time.Second, "How often to rescan devices and reconcile node labels")
 	hostRoot          = os.Getenv("HOST_ROOT")
 )
 

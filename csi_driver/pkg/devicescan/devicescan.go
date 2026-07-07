@@ -131,6 +131,9 @@ func Discover(hostRoot string) []Device {
 
 	entries, err := os.ReadDir(devDir) // already sorted by name
 	if err != nil {
+		// Treated the same as "no devices" rather than surfaced as an error:
+		// a transient failure to read this dir is unlikely and self-heals on
+		// the next reconcile loop, so it's not worth a separate error path.
 		util.Log.Info("cannot read device dir", "path", devDir, "err", err)
 		return nil
 	}
