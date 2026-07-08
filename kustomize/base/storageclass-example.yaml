@@ -19,12 +19,39 @@
 #
 # provisioner must match the CSI driver name: freeport.local
 # StorageClasses are cluster-scoped — no namespace field.
-
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: freeport-generic
+provisioner: freeport.local
+parameters:
+  storageClassName: "freeport-generic"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: freeport.local/generic-usb-disk-2.0
+        values: ["true"]
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freeport-sandisk
+provisioner: freeport.local
+parameters:
+  storageClassName: "freeport-sandisk"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: freeport.local/sandisk-cruzer
+        values: ["true"]
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freeport-unknown-usb-disk
 provisioner: freeport.local
 parameters:
   storageClassName: "freeport-unknown-usb-disk"
