@@ -10,9 +10,6 @@ v1_api = client.CoreV1Api()
 storage_api = client.StorageV1Api()
 CSI_PROVISIONER = "freeport.local"
 STORAGE_CLASS = "freeport-generic"
-BLOCKDEVICE_GROUP = "freeport.local"
-BLOCKDEVICE_VERSION = "v1alpha1"
-BLOCKDEVICE_PLURAL = "blockdevices"
 
 # String to check logs for failure
 FAIL_STR="__FAIL__"
@@ -20,23 +17,30 @@ FAIL_STR="__FAIL__"
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-custom_api = client.CustomObjectsApi()
-
 
 
 def get_nodes_with_class(storage_class_name):
-    """Return list of node names that have a BlockDevice matching the given class."""
-    result = custom_api.list_cluster_custom_object(
-        group=BLOCKDEVICE_GROUP,
-        version=BLOCKDEVICE_VERSION,
-        plural=BLOCKDEVICE_PLURAL,
-    )
+    """Return list of node names currently eligible for storage_class_name.
+
+    There's no BlockDevice CRD or other side-channel inventory — a node's
+    eligibility for a StorageClass is exactly "does this node carry every
+    freeport.local/<manufacturer>-<model>=true label the StorageClass's
+    allowedTopologies require" (pkg/manager sets those labels to reflect
+    whatever USB device is actually plugged into that node right now, see
+    pkg/manager/manager.go's desiredLabels/diffLabels). matchLabelExpressions
+    within one term are AND'd; multiple terms in allowedTopologies are OR'd.
+    """
+    sc = storage_api.read_storage_class(storage_class_name)
+    terms = sc.allowed_topologies or []
+
     nodes = []
-    for item in result.get("items", []):
-        bd_class = item.get("spec", {}).get("class") or item.get("status", {}).get("class")
-        node = item.get("spec", {}).get("node") or item.get("status", {}).get("node")
-        if bd_class == storage_class_name and node and node not in nodes:
-            nodes.append(node)
+    for node in v1_api.list_node().items:
+        labels = node.metadata.labels or {}
+        if any(
+            all(labels.get(expr.key) in (expr.values or []) for expr in term.match_label_expressions)
+            for term in terms
+        ):
+            nodes.append(node.metadata.name)
     return nodes
 
 
@@ -131,7 +135,9 @@ def wait_and_check_pod_container_log(pod_name, namespace, container, expected, t
 
 
 def assert_pv_valid(pv_name, pvc_name, namespace):
-    """Common PV assertions — correct driver, bound, claimRef matches."""
+    """Common PV assertions — correct driver, bound, claimRef matches, and
+    carries a freeport.local/* nodeAffinity requirement (the actual topology
+    mechanism — proves the PV isn't schedulable onto just any node)."""
     pv = v1_api.read_persistent_volume(pv_name)
     assert pv.status.phase == "Bound", f"PV not Bound: {pv.status.phase}"
     assert pv.spec.claim_ref.name == pvc_name
@@ -140,6 +146,14 @@ def assert_pv_valid(pv_name, pvc_name, namespace):
     assert pv.spec.csi.driver == CSI_PROVISIONER, f"Wrong driver: {pv.spec.csi.driver}"
     assert pv.spec.csi.volume_handle is not None, "No volumeHandle — CreateVolume returned no ID"
     assert pv.metadata.annotations.get("pv.kubernetes.io/provisioned-by") == CSI_PROVISIONER
+
+    prefix = f"{CSI_PROVISIONER}/"
+    terms = (pv.spec.node_affinity and pv.spec.node_affinity.required.node_selector_terms) or []
+    assert any(
+        expr.key.startswith(prefix)
+        for term in terms
+        for expr in term.match_expressions
+    ), f"PV {pv_name} has no {prefix}* nodeAffinity requirement — topology wasn't applied"
     return pv
 
 
