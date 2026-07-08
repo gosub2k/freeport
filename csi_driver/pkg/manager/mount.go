@@ -81,36 +81,41 @@ type mountedDevice struct {
 	free       int64
 }
 
-// mountAll attempts to mount every discovered device, keyed by serial in
-// m.mountFailures to skip (without re-attempting or re-logging) any device
-// that has already failed maxMountFailures times in a row. A device's
-// failure count is cleared once it mounts successfully, or once it's no
-// longer discovered at all (unplugged) — so a later reinsertion (or a
-// replacement device that happens to reuse hardware) gets a fresh set of
-// attempts rather than being permanently blacklisted.
+// mountAll attempts to mount every discovered device, keyed by DevPath (not
+// Serial — a single physical USB stick can carry multiple partitions, e.g.
+// one valid filesystem plus a stray/uninitialized one, and they all share
+// one Serial from the common USB sysfs node; keying by Serial would let a
+// sibling partition's success reset a genuinely broken partition's failure
+// count on every tick, so it would never actually hit the cap) in
+// m.mountFailures, to skip (without re-attempting or re-logging) any
+// partition that has already failed maxMountFailures times in a row. A
+// partition's failure count is cleared once it mounts successfully, or once
+// it's no longer discovered at all (unplugged) — so a later reinsertion (or
+// a replacement device that happens to reuse the same path) gets a fresh
+// set of attempts rather than being permanently blacklisted.
 func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
 	seen := map[string]bool{}
 	var mounted []mountedDevice
 	for _, d := range discovered {
-		seen[d.Serial] = true
-		if m.mountFailures[d.Serial] >= maxMountFailures {
+		seen[d.DevPath] = true
+		if m.mountFailures[d.DevPath] >= maxMountFailures {
 			continue
 		}
 		mp := m.mountFn(m.hostRoot, d)
 		if mp == "" {
-			m.mountFailures[d.Serial]++
-			if m.mountFailures[d.Serial] == maxMountFailures {
+			m.mountFailures[d.DevPath]++
+			if m.mountFailures[d.DevPath] == maxMountFailures {
 				util.Log.Error("mount failed repeatedly, giving up until device is removed and reinserted",
 					"dev", d.DevPath, "failures", maxMountFailures)
 			}
 			continue
 		}
-		delete(m.mountFailures, d.Serial)
+		delete(m.mountFailures, d.DevPath)
 		mounted = append(mounted, mountedDevice{Device: d, mountpoint: mp, free: getDf(mp)})
 	}
-	for serial := range m.mountFailures {
-		if !seen[serial] {
-			delete(m.mountFailures, serial)
+	for devPath := range m.mountFailures {
+		if !seen[devPath] {
+			delete(m.mountFailures, devPath)
 		}
 	}
 	return mounted

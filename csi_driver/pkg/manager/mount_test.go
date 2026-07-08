@@ -131,8 +131,8 @@ func TestMountAll_givesUpAfterMaxFailures(t *testing.T) {
 	if calls != maxMountFailures {
 		t.Errorf("mountFn called %d times, want exactly %d (further passes should skip)", calls, maxMountFailures)
 	}
-	if m.mountFailures["SN1"] != maxMountFailures {
-		t.Errorf("mountFailures[SN1] = %d, want %d", m.mountFailures["SN1"], maxMountFailures)
+	if m.mountFailures["/dev/sdx1"] != maxMountFailures {
+		t.Errorf("mountFailures[/dev/sdx1] = %d, want %d", m.mountFailures["/dev/sdx1"], maxMountFailures)
 	}
 }
 
@@ -152,16 +152,16 @@ func TestMountAll_successResetsFailureCount(t *testing.T) {
 
 	m.mountAll([]devicescan.Device{dev})
 	m.mountAll([]devicescan.Device{dev})
-	if m.mountFailures["SN1"] != 2 {
-		t.Fatalf("mountFailures[SN1] = %d, want 2 before the successful attempt", m.mountFailures["SN1"])
+	if m.mountFailures["/dev/sdx1"] != 2 {
+		t.Fatalf("mountFailures[/dev/sdx1] = %d, want 2 before the successful attempt", m.mountFailures["/dev/sdx1"])
 	}
 
 	got := m.mountAll([]devicescan.Device{dev})
 	if len(got) != 1 || got[0].mountpoint != "/mnt/k8s-freeport-SN1" {
 		t.Fatalf("mountAll = %v, want the device mounted on the 3rd attempt", got)
 	}
-	if _, stillTracked := m.mountFailures["SN1"]; stillTracked {
-		t.Errorf("mountFailures[SN1] should have been cleared on success, still present: %v", m.mountFailures)
+	if _, stillTracked := m.mountFailures["/dev/sdx1"]; stillTracked {
+		t.Errorf("mountFailures[/dev/sdx1] should have been cleared on success, still present: %v", m.mountFailures)
 	}
 }
 
@@ -176,18 +176,53 @@ func TestMountAll_deviceGoneResetsFailureCount(t *testing.T) {
 
 	m.mountAll([]devicescan.Device{dev})
 	m.mountAll([]devicescan.Device{dev})
-	if m.mountFailures["SN1"] != 2 {
-		t.Fatalf("mountFailures[SN1] = %d, want 2", m.mountFailures["SN1"])
+	if m.mountFailures["/dev/sdx1"] != 2 {
+		t.Fatalf("mountFailures[/dev/sdx1] = %d, want 2", m.mountFailures["/dev/sdx1"])
 	}
 
 	m.mountAll(nil) // device unplugged — not in this pass's discovered list
-	if _, tracked := m.mountFailures["SN1"]; tracked {
-		t.Fatalf("mountFailures[SN1] should be cleared once the device is no longer discovered, still present: %v", m.mountFailures)
+	if _, tracked := m.mountFailures["/dev/sdx1"]; tracked {
+		t.Fatalf("mountFailures[/dev/sdx1] should be cleared once the device is no longer discovered, still present: %v", m.mountFailures)
 	}
 
 	m.mountAll([]devicescan.Device{dev}) // reinserted — should get a fresh attempt budget
-	if m.mountFailures["SN1"] != 1 {
-		t.Errorf("mountFailures[SN1] = %d after reinsertion, want 1 (fresh budget, not resumed at 2)", m.mountFailures["SN1"])
+	if m.mountFailures["/dev/sdx1"] != 1 {
+		t.Errorf("mountFailures[/dev/sdx1] = %d after reinsertion, want 1 (fresh budget, not resumed at 2)", m.mountFailures["/dev/sdx1"])
+	}
+}
+
+// TestMountAll_siblingPartitionSuccessDoesNotResetFailureCount is a
+// regression test for a real bug found running against actual hardware: a
+// physical USB stick with a good partition (e.g. sdf1, mounts fine) and a
+// genuinely broken sibling (e.g. sdf3, bad superblock) share one Serial from
+// the common USB sysfs node. Keying mountFailures by Serial meant sdf1's
+// success cleared the shared counter every tick before sdf3 could ever
+// accumulate 3 consecutive failures — the cap silently never engaged, and
+// "mount failed" logged forever. Keying by DevPath instead fixes this.
+func TestMountAll_siblingPartitionSuccessDoesNotResetFailureCount(t *testing.T) {
+	goodPartition := devicescan.Device{Serial: "SHARED", DevPath: "/dev/sdf1", Partition: 1}
+	badPartition := devicescan.Device{Serial: "SHARED", DevPath: "/dev/sdf3", Partition: 3}
+
+	m := &Manager{
+		mountFailures: map[string]int{},
+		mountFn: func(hostRoot string, dev devicescan.Device) string {
+			if dev.DevPath == goodPartition.DevPath {
+				return "/mnt/k8s-freeport-SHARED"
+			}
+			return "" // badPartition always fails, every tick, forever
+		},
+	}
+
+	for i := 0; i < 5; i++ {
+		m.mountAll([]devicescan.Device{goodPartition, badPartition})
+	}
+
+	if m.mountFailures["/dev/sdf3"] != maxMountFailures {
+		t.Errorf("mountFailures[/dev/sdf3] = %d, want %d — the good sibling partition's success must not reset the bad one's count",
+			m.mountFailures["/dev/sdf3"], maxMountFailures)
+	}
+	if _, tracked := m.mountFailures["/dev/sdf1"]; tracked {
+		t.Errorf("mountFailures[/dev/sdf1] should never be tracked, it always succeeds: %v", m.mountFailures)
 	}
 }
 
