@@ -1,0 +1,57 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: ephemeral-inline-volume
+spec:
+  description: >
+    Exercises the CSI Ephemeral volume lifecycle mode (csidriver.yaml
+    declares volumeLifecycleModes: [Persistent, Ephemeral]) — a completely
+    different path from every other test here: no PVC, no PV, no
+    provisioner, no topology/scheduling involvement at all. kubelet calls
+    NodePublishVolume directly from the pod spec's csi.volumeAttributes.
+    Deliberately doesn't pin a device class (matches test/manual/inline.yaml)
+    so it works regardless of which node the scheduler happens to pick,
+    since every node in this cluster has at least one device mounted.
+  timeouts:
+    delete: 90s
+    cleanup: 90s
+  steps:
+    - try:
+        - apply:
+            resource:
+              kind: Pod
+              apiVersion: v1
+              metadata:
+                name: test-csi-driver-inline
+              spec:
+                terminationGracePeriodSeconds: 2
+                volumes:
+                  - name: scratch-vol-inline
+                    csi:
+                      driver: freeport.local
+                      volumeAttributes:
+                        storageClassName: freeport-generic
+                containers:
+                  - name: test-script
+                    image: busybox
+                    command: ["sh", "-c", "echo hello > /data/hello.txt && if [ \"$(cat /data/hello.txt)\" = hello ]; then echo 'read and write to volume worked!'; sleep 300; else exit 1; fi"]
+                    volumeMounts:
+                      - mountPath: "/data"
+                        name: scratch-vol-inline
+        - script:
+            timeout: 90s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -euo pipefail
+              for i in $(seq 1 40); do
+                if kubectl logs -n "$NAMESPACE" test-csi-driver-inline 2>/dev/null | grep -q "read and write to volume worked"; then
+                  echo "PASS: ephemeral inline volume read/write worked"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "FAIL: pod log never confirmed read/write success" >&2
+              kubectl logs -n "$NAMESPACE" test-csi-driver-inline || true
+              exit 1

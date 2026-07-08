@@ -1,23 +1,18 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: topology-followed
+  name: sandisk-any-topology
 spec:
   description: >
-    Verifies the actual topology mechanism end to end, not just that binding
-    happened: the PV backing scratch-pvc must carry a freeport.local/*
-    nodeAffinity requirement, and the node the pod was actually scheduled to
-    must carry a matching freeport.local/<manufacturer>-<model>=true label —
-    the same label pkg/manager sets from live USB device state (see
-    pkg/manager/manager.go's desiredLabels/diffLabels). If this ever passes
-    with an empty requirement list or a node that doesn't satisfy it,
-    topology-based scheduling has silently stopped working. Uses
-    freeport-unknown-usb-disk since every node in this cluster currently
-    reports that class, unlike freeport-generic.
+    freeport-sandisk-any (kustomize/base/storageclass-example.yaml) has
+    THREE OR'd allowedTopologies terms (sandisk-u3-cruzer-micro,
+    sandisk-extreme, sandisk-cruzer) — only one needs to match. Currently
+    only freeport.local/sandisk-extreme=true exists in this cluster (on
+    node worker-1), so this specifically exercises that a StorageClass
+    with multiple alternative device-class terms actually matches on
+    whichever single one is real, not just the single-term case
+    topology-followed already covers.
   timeouts:
-    # Real USB-backed unmount (NodeUnpublishVolume) during pod teardown can
-    # take well past chainsaw's 30s default cleanup/delete timeouts on
-    # actual hardware — this isn't an emulated/mock driver.
     delete: 90s
     cleanup: 90s
   steps:
@@ -29,7 +24,7 @@ spec:
               metadata:
                 name: scratch-pvc
               spec:
-                storageClassName: freeport-unknown-usb-disk
+                storageClassName: freeport-sandisk-any
                 accessModes: ["ReadWriteOnce"]
                 resources:
                   requests:
@@ -72,10 +67,6 @@ spec:
 
               PV=$(kubectl get pvc -n "$NAMESPACE" scratch-pvc -o jsonpath='{.spec.volumeName}')
 
-              # PVC turning Bound and the scheduler setting the pod's
-              # nodeName are two independent controllers acting on two
-              # different objects — not atomic, so nodeName can still be
-              # empty for a moment right after the assert above passes.
               NODE=""
               for i in $(seq 1 30); do
                 NODE=$(kubectl get pod -n "$NAMESPACE" test-csi-driver-pvc -o jsonpath='{.spec.nodeName}')
@@ -90,12 +81,14 @@ spec:
               fi
               echo "PV=$PV NODE=$NODE"
 
+              if [ "$NODE" != "worker-1" ]; then
+                echo "FAIL: expected scheduling onto worker-1 (the only node with a matching sandisk class), got $NODE" >&2
+                exit 1
+              fi
+
               PV_JSON=$(kubectl get pv "$PV" -o json)
               NODE_JSON=$(kubectl get node "$NODE" -o json)
 
-              # portable pipes (printf | jq), not bash-only <<< here-strings —
-              # chainsaw's script operation defaults to /bin/sh, which on
-              # many systems is dash, not bash.
               REQUIRED_KEYS=$(printf '%s' "$PV_JSON" | jq -r '
                 [.spec.nodeAffinity.required.nodeSelectorTerms[]?.matchExpressions[]?
                  | select(.key | startswith("freeport.local/")) | .key] | .[]
@@ -119,4 +112,4 @@ spec:
                 fi
               done
 
-              echo "PASS: topology followed — PV $PV correctly pinned to node $NODE"
+              echo "PASS: sandisk-any topology followed — PV $PV correctly pinned to node $NODE"

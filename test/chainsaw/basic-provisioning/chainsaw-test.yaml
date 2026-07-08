@@ -4,12 +4,14 @@ metadata:
   name: basic-provisioning
 spec:
   description: >
-    PVC provisioning happy path, reusing test/manual/pvcpod.yaml as-is: a PVC
-    against the freeport-generic StorageClass binds, and the pod's own
-    read/write check (baked into that fixture's container command) actually
-    succeeds — the same ground test_integration.py's
-    test_pvc_triggers_createvolume_and_binds_pv / test_shared_volume_read_write
-    cover, in chainsaw's declarative form.
+    PVC provisioning happy path against freeport-unknown-usb-disk — chosen
+    because, unlike freeport-generic (which needs a real "Generic"/"USB Disk
+    2.0" descriptor device), every node in this cluster currently reports a
+    freeport.local/unknown-usb-disk-2.0 device, so this test doesn't depend
+    on which specific USB stick happens to be plugged in where today. A PVC
+    binds, and the pod's own read/write check actually succeeds — the same
+    ground test_integration.py's test_pvc_triggers_createvolume_and_binds_pv
+    / test_shared_volume_read_write cover, in chainsaw's declarative form.
   timeouts:
     # Real USB-backed unmount (NodeUnpublishVolume) during pod teardown can
     # take well past chainsaw's 30s default cleanup/delete timeouts on
@@ -19,7 +21,36 @@ spec:
   steps:
     - try:
         - apply:
-            file: ../../manual/pvcpod.yaml
+            resource:
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: scratch-pvc
+              spec:
+                storageClassName: freeport-unknown-usb-disk
+                accessModes: ["ReadWriteOnce"]
+                resources:
+                  requests:
+                    storage: 1Gi
+        - apply:
+            resource:
+              kind: Pod
+              apiVersion: v1
+              metadata:
+                name: test-csi-driver-pvc
+              spec:
+                terminationGracePeriodSeconds: 2
+                volumes:
+                  - name: scratch-pv
+                    persistentVolumeClaim:
+                      claimName: scratch-pvc
+                containers:
+                  - name: test-script
+                    image: busybox
+                    command: ["sh", "-c", "echo hello > /data/hello.txt && if [ \"$(cat /data/hello.txt)\" = hello ]; then echo 'read and write to volume worked!'; sleep 300; else exit 1; fi"]
+                    volumeMounts:
+                      - mountPath: "/data"
+                        name: scratch-pv
         - assert:
             timeout: 60s
             resource:
@@ -36,11 +67,11 @@ spec:
                 value: ($namespace)
             content: |
               set -euo pipefail
-              # pvcpod.yaml's container writes then reads back a file on the
-              # volume and exits 1 on mismatch — with the default restart
-              # policy a failed check can still leave the pod "Running" via
-              # kubelet's restart loop, so check the log content directly
-              # rather than trusting pod phase alone.
+              # the container writes then reads back a file on the volume
+              # and exits 1 on mismatch — with the default restart policy a
+              # failed check can still leave the pod "Running" via kubelet's
+              # restart loop, so check the log content directly rather than
+              # trusting pod phase alone.
               for i in $(seq 1 40); do
                 if kubectl logs -n "$NAMESPACE" test-csi-driver-pvc 2>/dev/null | grep -q "read and write to volume worked"; then
                   echo "PASS: pod confirmed read/write worked"
