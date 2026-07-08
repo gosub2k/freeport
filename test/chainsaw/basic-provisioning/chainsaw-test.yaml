@@ -1,0 +1,53 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: basic-provisioning
+spec:
+  description: >
+    PVC provisioning happy path, reusing test/manual/pvcpod.yaml as-is: a PVC
+    against the freeport-generic StorageClass binds, and the pod's own
+    read/write check (baked into that fixture's container command) actually
+    succeeds — the same ground test_integration.py's
+    test_pvc_triggers_createvolume_and_binds_pv / test_shared_volume_read_write
+    cover, in chainsaw's declarative form.
+  timeouts:
+    # Real USB-backed unmount (NodeUnpublishVolume) during pod teardown can
+    # take well past chainsaw's 30s default cleanup/delete timeouts on
+    # actual hardware — this isn't an emulated/mock driver.
+    delete: 90s
+    cleanup: 90s
+  steps:
+    - try:
+        - apply:
+            file: ../../manual/pvcpod.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: scratch-pvc
+              status:
+                phase: Bound
+        - script:
+            timeout: 90s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -euo pipefail
+              # pvcpod.yaml's container writes then reads back a file on the
+              # volume and exits 1 on mismatch — with the default restart
+              # policy a failed check can still leave the pod "Running" via
+              # kubelet's restart loop, so check the log content directly
+              # rather than trusting pod phase alone.
+              for i in $(seq 1 40); do
+                if kubectl logs -n "$NAMESPACE" test-csi-driver-pvc 2>/dev/null | grep -q "read and write to volume worked"; then
+                  echo "PASS: pod confirmed read/write worked"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "FAIL: pod log never confirmed read/write success" >&2
+              kubectl logs -n "$NAMESPACE" test-csi-driver-pvc || true
+              exit 1
