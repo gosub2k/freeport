@@ -38,13 +38,18 @@ func (ids *IdentityServer) GetPluginCapabilities(ctx context.Context, req *csi.G
 				},
 			},
 		})
-		// caps = append(caps, &csi.PluginCapability{
-		// 	Type: &csi.PluginCapability_Service_{
-		// 		Service: &csi.PluginCapability_Service{
-		// 			Type: csi.PluginCapability_Service_Type(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME),
-		// 		},
-		// 	},
-		// })
+		// Without this, external-provisioner never populates
+		// CreateVolumeRequest.AccessibilityRequirements at all — regardless
+		// of CSINode topologyKeys or the StorageClass's allowedTopologies
+		// being correctly configured — so no PV ever gets a nodeAffinity and
+		// device-class-based node selection silently never happens.
+		caps = append(caps, &csi.PluginCapability{
+			Type: &csi.PluginCapability_Service_{
+				Service: &csi.PluginCapability_Service{
+					Type: csi.PluginCapability_Service_VOLUME_ACCESSIBILITY_CONSTRAINTS,
+				},
+			},
+		})
 	}
 
 	return &csi.GetPluginCapabilitiesResponse{Capabilities: caps}, nil
