@@ -2,10 +2,78 @@ package manager
 
 import (
 	"reflect"
+	"sort"
 	"testing"
 
 	"freeport/pkg/devicescan"
 )
+
+func serials(devices []mountedDevice) []string {
+	if len(devices) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, d.Serial)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestDeviceDelta(t *testing.T) {
+	a := mountedDevice{Device: devicescan.Device{Serial: "A"}}
+	b := mountedDevice{Device: devicescan.Device{Serial: "B"}}
+	c := mountedDevice{Device: devicescan.Device{Serial: "C"}}
+
+	tests := []struct {
+		name        string
+		prev, curr  map[string]mountedDevice
+		wantAdded   []string
+		wantRemoved []string
+	}{
+		{
+			name: "no change reports nothing",
+			prev: map[string]mountedDevice{"A": a, "B": b},
+			curr: map[string]mountedDevice{"A": a, "B": b},
+		},
+		{
+			name:      "new device is added",
+			prev:      map[string]mountedDevice{"A": a},
+			curr:      map[string]mountedDevice{"A": a, "B": b},
+			wantAdded: []string{"B"},
+		},
+		{
+			name:        "unplugged device is removed",
+			prev:        map[string]mountedDevice{"A": a, "B": b},
+			curr:        map[string]mountedDevice{"A": a},
+			wantRemoved: []string{"B"},
+		},
+		{
+			name:        "add and remove in the same tick",
+			prev:        map[string]mountedDevice{"A": a, "B": b},
+			curr:        map[string]mountedDevice{"A": a, "C": c},
+			wantAdded:   []string{"C"},
+			wantRemoved: []string{"B"},
+		},
+		{
+			name:      "first tick with no prior state reports everything as added",
+			prev:      map[string]mountedDevice{},
+			curr:      map[string]mountedDevice{"A": a, "B": b},
+			wantAdded: []string{"A", "B"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			added, removed := deviceDelta(tt.prev, tt.curr)
+			if got := serials(added); !reflect.DeepEqual(got, tt.wantAdded) {
+				t.Errorf("added = %v, want %v", got, tt.wantAdded)
+			}
+			if got := serials(removed); !reflect.DeepEqual(got, tt.wantRemoved) {
+				t.Errorf("removed = %v, want %v", got, tt.wantRemoved)
+			}
+		})
+	}
+}
 
 func TestDesiredLabels(t *testing.T) {
 	devices := []mountedDevice{

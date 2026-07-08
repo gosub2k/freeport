@@ -16,6 +16,20 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  # SECURITY-RELEVANT: cluster-wide PV and Pod access, for device migration
+  # (see pkg/manager/migrate.go). This DaemonSet is already privileged /
+  # hostPID / host-root on every node it runs on, so this doesn't cross a new
+  # trust boundary for node compromise — but it does let a compromised or
+  # buggy manager pod delete any namespace's Pods and any PersistentVolume in
+  # the cluster, not just freeport-owned ones. There's no per-object-name or
+  # per-namespace restriction available here (PVs are cluster-scoped; a
+  # migrated device's volumes can back a claim in any namespace).
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "update", "delete", "create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

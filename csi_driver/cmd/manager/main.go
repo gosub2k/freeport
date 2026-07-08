@@ -29,6 +29,10 @@ func main() {
 		util.Log.Error("node name is required (--nodename or NODE_NAME)")
 		os.Exit(1)
 	}
+	// Tag every subsequent log line from this process with the node it's
+	// running on — this DaemonSet's logs get aggregated cluster-wide, so
+	// without this there'd be no way to tell which node emitted a given line.
+	util.Log = util.Log.With("node", *nodeName)
 	if hostRoot == "" {
 		util.Log.Info("HOST_ROOT not set")
 	}

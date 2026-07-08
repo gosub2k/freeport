@@ -24,14 +24,34 @@ type Manager struct {
 	nodeName   string
 	hostRoot   string
 	driverName string
+
+	// lastSeen is the mounted-device set from the previous ReconcileOnce
+	// call, keyed by serial, purely so device add/remove transitions can be
+	// logged at Info while steady-state presence stays at Debug. It carries
+	// no correctness weight — losing it (e.g. on a manager restart) just
+	// means the next tick logs every currently-mounted device as "added"
+	// once, which is harmless.
+	lastSeen map[string]mountedDevice
+
+	// mountFailures counts consecutive mount(8) failures per device serial,
+	// so mountAll can stop retrying (and stop logging) a permanently broken
+	// device instead of failing identically forever. See mountAll.
+	mountFailures map[string]int
+
+	// mountFn is mountDevice by default; swappable in tests the same way
+	// pkg/driver's NodeServer makes mountFn/scanFn swappable.
+	mountFn func(hostRoot string, dev devicescan.Device) string
 }
 
 func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) *Manager {
 	return &Manager{
-		clientset:  clientset,
-		nodeName:   nodeName,
-		hostRoot:   hostRoot,
-		driverName: driverName,
+		clientset:     clientset,
+		nodeName:      nodeName,
+		hostRoot:      hostRoot,
+		driverName:    driverName,
+		lastSeen:      map[string]mountedDevice{},
+		mountFailures: map[string]int{},
+		mountFn:       mountDevice,
 	}
 }
 
@@ -62,20 +82,25 @@ func (m *Manager) Run(ctx context.Context, interval time.Duration) {
 // classes found — adding new ones and removing stale ones in the same pass.
 func (m *Manager) ReconcileOnce(ctx context.Context) error {
 	discovered := devicescan.Discover(m.hostRoot)
-	var mounted []mountedDevice
-	for _, d := range discovered {
-		mp := mountDevice(m.hostRoot, d)
-		if mp == "" {
-			continue
-		}
-		mounted = append(mounted, mountedDevice{
-			Device:     d,
-			mountpoint: mp,
-			free:       getDf(mp),
-		})
-	}
+	mounted := m.mountAll(discovered)
+
+	current := map[string]mountedDevice{}
 	for _, d := range mounted {
-		util.Log.Info(d.String())
+		current[d.Serial] = d
+		util.Log.Debug("mounted device", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+	}
+	added, removed := deviceDelta(m.lastSeen, current)
+	for _, d := range added {
+		util.Log.Info("device added", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+	}
+	for _, d := range removed {
+		util.Log.Info("device removed", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+		cleanupMountpoint(m.hostRoot, d.mountpoint)
+	}
+	m.lastSeen = current
+
+	if err := m.migrateStaleVolumes(ctx, mounted); err != nil {
+		util.Log.Error("volume migration failed", "err", err)
 	}
 
 	node, err := m.clientset.CoreV1().Nodes().Get(ctx, m.nodeName, metav1.GetOptions{})
@@ -96,9 +121,26 @@ func (m *Manager) ReconcileOnce(ctx context.Context) error {
 		return err
 	}
 
-	util.Log.Info("patching node labels", "node", m.nodeName, "patch", patch)
+	util.Log.Info("patching node labels", "patch", patch)
 	_, err = m.clientset.CoreV1().Nodes().Patch(ctx, m.nodeName, types.MergePatchType, body, metav1.PatchOptions{})
 	return err
+}
+
+// deviceDelta returns the devices present in current but not prev (added)
+// and vice versa (removed), keyed by serial, so ReconcileOnce can log only
+// transitions at Info instead of every mounted device on every tick.
+func deviceDelta(prev, current map[string]mountedDevice) (added, removed []mountedDevice) {
+	for serial, d := range current {
+		if _, ok := prev[serial]; !ok {
+			added = append(added, d)
+		}
+	}
+	for serial, d := range prev {
+		if _, ok := current[serial]; !ok {
+			removed = append(removed, d)
+		}
+	}
+	return added, removed
 }
 
 // desiredLabels returns the full set of "<driverName>/<manufacturer>-<model>=true"
