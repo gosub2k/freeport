@@ -43,7 +43,14 @@ spec:
           args:
             - "--v=3"
             - "--csi-address=$(CSI_ENDPOINT)"
-            # REVISIT: it 
+            # Topology is alpha and disabled by default in external-provisioner
+            # — without this, AccessibilityRequirements is never populated on
+            # CreateVolume regardless of the driver's VOLUME_ACCESSIBILITY_CONSTRAINTS
+            # capability or the StorageClass's allowedTopologies, so no PV
+            # ever gets a nodeAffinity and device-class node selection never
+            # actually happens.
+            - "--feature-gates=Topology=true"
+            # REVISIT: it
             #- "--leader-election=true"
             #- "--leader-election-namespace=kube-system"
           env:
