@@ -1,17 +1,15 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: sandisk-any-topology
+  name: sandisk-cruzer-topology
 spec:
   description: >
-    freeport-sandisk-any (kustomize/base/storageclass-example.yaml) has
-    THREE OR'd allowedTopologies terms (sandisk-u3-cruzer-micro,
-    sandisk-extreme, sandisk-cruzer) — only one needs to match. Currently
-    only freeport.local/sandisk-extreme=true exists in this cluster (on
-    node worker-1), so this specifically exercises that a StorageClass
-    with multiple alternative device-class terms actually matches on
-    whichever single one is real, not just the single-term case
-    topology-followed already covers.
+    freeport-sandisk-cruzer (kustomize/base/storageclass-example.yaml)
+    requires freeport.local/sandisk-cruzer=true. Currently only node
+    worker-2 reports that label, so this verifies both that the PVC binds
+    to a SanDisk-Cruzer-specific class (distinct from the universal
+    unknown-usb-disk-2.0 case topology-followed covers) and that the pod
+    actually lands on the one node that has it.
   timeouts:
     delete: 90s
     cleanup: 90s
@@ -24,7 +22,7 @@ spec:
               metadata:
                 name: scratch-pvc
               spec:
-                storageClassName: freeport-sandisk-any
+                storageClassName: freeport-sandisk-cruzer
                 accessModes: ["ReadWriteOnce"]
                 resources:
                   requests:
@@ -81,8 +79,8 @@ spec:
               fi
               echo "PV=$PV NODE=$NODE"
 
-              if [ "$NODE" != "worker-1" ]; then
-                echo "FAIL: expected scheduling onto worker-1 (the only node with a matching sandisk class), got $NODE" >&2
+              if [ "$NODE" != "worker-2" ]; then
+                echo "FAIL: expected scheduling onto worker-2 (the only node with freeport.local/sandisk-cruzer), got $NODE" >&2
                 exit 1
               fi
 
@@ -112,4 +110,4 @@ spec:
                 fi
               done
 
-              echo "PASS: sandisk-any topology followed — PV $PV correctly pinned to node $NODE"
+              echo "PASS: sandisk-cruzer topology followed — PV $PV correctly pinned to node $NODE"
