@@ -5,11 +5,13 @@ metadata:
 spec:
   description: >
     freeport-sandisk-cruzer (kustomize/base/storageclass-example.yaml)
-    requires freeport.local/sandisk-cruzer=true. Currently only node
-    worker-2 reports that label, so this verifies both that the PVC binds
-    to a SanDisk-Cruzer-specific class (distinct from the universal
-    unknown-usb-disk-2.0 case topology-followed covers) and that the pod
-    actually lands on the one node that has it.
+    requires freeport.local/sandisk-cruzer=true. Whichever node currently
+    reports that label is looked up dynamically (never hardcoded — which
+    node has which USB stick varies per cluster and over time), so this
+    verifies both that the PVC binds to a SanDisk-Cruzer-specific class
+    (distinct from the universal unknown-usb-disk-2.0 case
+    topology-followed covers) and that the pod actually lands on the one
+    node that has it.
   timeouts:
     delete: 90s
     cleanup: 90s
@@ -79,8 +81,15 @@ spec:
               fi
               echo "PV=$PV NODE=$NODE"
 
-              if [ "$NODE" != "worker-2" ]; then
-                echo "FAIL: expected scheduling onto worker-2 (the only node with freeport.local/sandisk-cruzer), got $NODE" >&2
+              EXPECTED_NODE=$(kubectl get nodes -o json | jq -r '
+                [.items[] | select(.metadata.labels["freeport.local/sandisk-cruzer"] == "true") | .metadata.name][0] // "MISSING"
+              ')
+              if [ "$EXPECTED_NODE" = "MISSING" ]; then
+                echo "FAIL: no node currently carries freeport.local/sandisk-cruzer=true — plug a SanDisk Cruzer into some node first" >&2
+                exit 1
+              fi
+              if [ "$NODE" != "$EXPECTED_NODE" ]; then
+                echo "FAIL: expected scheduling onto $EXPECTED_NODE (the only node with freeport.local/sandisk-cruzer), got $NODE" >&2
                 exit 1
               fi
 
