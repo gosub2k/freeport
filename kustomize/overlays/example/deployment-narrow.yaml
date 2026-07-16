@@ -13,6 +13,12 @@
 # relabel it there, and watch the old pod get deleted and a new one land on
 # the new node.
 #
+# writer appends a timestamp to /data/log.txt once a second. reader serves
+# the last 100 lines of that same file over HTTP (busybox's built-in httpd,
+# pointed at /data) via an auto-refreshing page — both containers share the
+# PVC, so this is also a live demo of concurrent multi-container access to
+# one CSI volume.
+#
 # --- How to check it worked ---
 #
 # 1. PVC bound (WaitForFirstConsumer means it stays Pending until the pod
@@ -23,9 +29,12 @@
 #      kubectl get pods -l app=test-csi-driver-narrow -o jsonpath='{.items[0].spec.nodeName}'
 #      kubectl get nodes -o json | jq -r '.items[] | select(.metadata.labels["freeport.local/sandisk-cruzer"]=="true") | .metadata.name'
 #
-# 3. Read/write check inside the container succeeded:
-#      kubectl logs -l app=test-csi-driver-narrow
-#      # want: "read and write to volume worked!"
+# 3. Watch the live log in a browser — find the NodePort and open it on
+#    any node's IP:
+#      kubectl get svc test-csi-driver-narrow -o jsonpath='{.spec.ports[0].nodePort}'
+#      # then open http://<any-node-ip>:<that-port>/ — the page refreshes
+#      # itself every second and should show a scrolling list of the last
+#      # 100 timestamps written so far.
 #
 # 4. (optional) The actual topology mechanism, not just that it happened to
 #    bind — the PV should carry a nodeAffinity requiring the label from step 2:
@@ -36,7 +45,8 @@
 #    node found in step 2 and plug it into a different node, then watch
 #      kubectl get pods -l app=test-csi-driver-narrow -w
 #    — the old pod should disappear and a new one appear, scheduled onto
-#    the new node.
+#    the new node (the browser tab from step 3 will start erroring until
+#    you point it at the new node's IP).
 
 apiVersion: apps/v1
 kind: Deployment
@@ -61,13 +71,54 @@ spec:
           persistentVolumeClaim:
             claimName: scratch-pvc-narrow
       containers:
-        - name: test-script
+        - name: writer
           image: busybox
-          command: [ "sh", "-c", "echo hello > /data/hello.txt && if [ \"$(cat /data/hello.txt)\" = hello ]; then echo 'read and write to volume worked!'; sleep 300; else exit 1; fi"]
+          command:
+            - "sh"
+            - "-c"
+            - "while true; do date; sleep 1; done >> /data/log.txt"
           volumeMounts:
           - mountPath: "/data"
             name: scratch-pv
-
+        - name: reader
+          image: busybox
+          # busybox httpd only serves static files (no CGI configured), so
+          # a background loop regenerates index.html once a second with the
+          # current tail -100 baked in, and httpd just serves whatever's on
+          # disk. Write-then-rename keeps httpd from ever serving a
+          # half-written file mid-update.
+          command:
+            - "sh"
+            - "-c"
+            - |
+              while true; do
+                {
+                  echo '<html><head><meta http-equiv="refresh" content="1"></head><body>'
+                  echo '<h1>freeport-sandisk-cruzer live log (last 100 lines)</h1><pre>'
+                  tail -n 100 /data/log.txt 2>/dev/null
+                  echo '</pre></body></html>'
+                } > /data/index.html.tmp
+                mv /data/index.html.tmp /data/index.html
+                sleep 1
+              done &
+              exec httpd -f -p 8080 -h /data
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+          - mountPath: "/data"
+            name: scratch-pv
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-csi-driver-narrow
+spec:
+  type: NodePort
+  selector:
+    app: test-csi-driver-narrow
+  ports:
+    - port: 8080
+      targetPort: 8080
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
