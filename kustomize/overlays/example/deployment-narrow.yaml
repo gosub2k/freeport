@@ -1,0 +1,82 @@
+# Deployed automatically as part of this overlay (see kustomization.yaml) —
+# no manual kubectl apply needed. This is here so the dev loop has
+# something concrete to watch for testing freeport-sandisk-cruzer (a
+# "narrow" class — only one node currently satisfies it), which requires
+# freeport.local/sandisk-cruzer=true — i.e. a real SanDisk Cruzer actually
+# plugged into some node right now.
+#
+# A Deployment, not a bare Pod: pkg/manager's device-migration feature
+# (see pkg/manager/migrate.go) deliberately refuses to bounce a pod with no
+# owning controller — nothing would recreate it. Using a Deployment here
+# means you can actually exercise migration manually: move the SanDisk
+# Cruzer to a different node, wait ~15s for the manager's reconcile loop to
+# relabel it there, and watch the old pod get deleted and a new one land on
+# the new node.
+#
+# --- How to check it worked ---
+#
+# 1. PVC bound (WaitForFirstConsumer means it stays Pending until the pod
+#    is scheduled):
+#      kubectl get pvc scratch-pvc-narrow -w
+#
+# 2. Pod landed on a node that actually has the device:
+#      kubectl get pods -l app=test-csi-driver-narrow -o jsonpath='{.items[0].spec.nodeName}'
+#      kubectl get nodes -o json | jq -r '.items[] | select(.metadata.labels["freeport.local/sandisk-cruzer"]=="true") | .metadata.name'
+#
+# 3. Read/write check inside the container succeeded:
+#      kubectl logs -l app=test-csi-driver-narrow
+#      # want: "read and write to volume worked!"
+#
+# 4. (optional) The actual topology mechanism, not just that it happened to
+#    bind — the PV should carry a nodeAffinity requiring the label from step 2:
+#      PV=$(kubectl get pvc scratch-pvc-narrow -o jsonpath='{.spec.volumeName}')
+#      kubectl get pv "$PV" -o jsonpath='{.spec.nodeAffinity}' | jq .
+#
+# 5. (optional) Manually test migration: unplug the SanDisk Cruzer from the
+#    node found in step 2 and plug it into a different node, then watch
+#      kubectl get pods -l app=test-csi-driver-narrow -w
+#    — the old pod should disappear and a new one appear, scheduled onto
+#    the new node.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-csi-driver-narrow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-csi-driver-narrow
+  template:
+    metadata:
+      labels:
+        app: test-csi-driver-narrow
+    spec:
+      # busybox's `sh -c "... && sleep N"` doesn't forward SIGTERM to the
+      # sleep promptly, so deletion otherwise sits at the default 30s grace
+      # period.
+      terminationGracePeriodSeconds: 2
+      volumes:
+        - name: scratch-pv
+          persistentVolumeClaim:
+            claimName: scratch-pvc-narrow
+      containers:
+        - name: test-script
+          image: busybox
+          command: [ "sh", "-c", "echo hello > /data/hello.txt && if [ \"$(cat /data/hello.txt)\" = hello ]; then echo 'read and write to volume worked!'; sleep 300; else exit 1; fi"]
+          volumeMounts:
+          - mountPath: "/data"
+            name: scratch-pv
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scratch-pvc-narrow
+spec:
+  storageClassName: freeport-sandisk-cruzer
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
