@@ -7,4 +7,3 @@ resources:
   - manager-daemonset.yaml
   - namespace.yaml
   - rbac.yaml
-  - storageclass-example.yaml

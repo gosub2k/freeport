@@ -1,4 +1,4 @@
-# Sample StorageClass for the freeport USB provisioner.
+# Sample StorageClasses for the freeport USB provisioner.
 #
 # Device matching is done entirely through topology, not parameters. Each
 # node advertises one accessible-topology segment per USB device it finds,

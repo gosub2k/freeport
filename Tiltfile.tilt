@@ -38,7 +38,11 @@ make_build(CTRL_REF, 'csi_driver', 'csi_driver/Dockerfile.controller', ['csi_dri
 make_build(NODE_REF, 'csi_driver', 'csi_driver/Dockerfile.node',       ['csi_driver'])
 make_build(MGR_REF,  'csi_driver', 'csi_driver/Dockerfile.manager',    ['csi_driver'])
 
-kustomize_yaml = kustomize('kustomize/base')
+# Set KUSTOMIZE_DIR to point at a personal overlay (e.g. kustomize/overlays/example)
+# that adds StorageClasses/test fixtures for your own cluster's specific
+# devices — base alone has no StorageClasses at all.
+kustomize_dir = os.environ.get('KUSTOMIZE_DIR', 'kustomize/base')
+kustomize_yaml = kustomize(kustomize_dir)
 k8s_yaml(kustomize_yaml)
 
 k8s_resource(workload='freeport-csi-controller', port_forwards=[])
