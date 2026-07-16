@@ -1,22 +1,32 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: sandisk-cruzer-topology
+  name: topology-followed-narrow
 spec:
   description: >
-    freeport-sandisk-cruzer (kustomize/base/storageclass-example.yaml)
-    requires freeport.local/sandisk-cruzer=true. Whichever node currently
-    reports that label is looked up dynamically (never hardcoded — which
-    node has which USB stick varies per cluster and over time), so this
-    verifies both that the PVC binds to a SanDisk-Cruzer-specific class
-    (distinct from the universal unknown-usb-disk-2.0 case
-    topology-followed covers) and that the pod actually lands on the one
-    node that has it.
+    Same check as topology-followed-broad, but against a StorageClass that
+    only one node currently satisfies (not every node) — exercises that a
+    narrow device class still resolves to correct, non-empty nodeAffinity.
+    Bound from --values' narrowStorageClassName (see
+    test/chainsaw/values.yaml.example) — a StorageClass whose
+    allowedTopologies only some of your nodes currently satisfy — so this
+    runs against any cluster's own set of freeport.local StorageClasses,
+    not just the author's.
+  bindings:
+    - name: storageClassName
+      value: ($values.narrowStorageClassName)
   timeouts:
     delete: 90s
     cleanup: 90s
   steps:
     - try:
+        # storageClassName has no fallback — see basic-provisioning's guard
+        # comment for why this must come first and be threaded through env.
+        - script:
+            env:
+              - name: SC
+                value: ($storageClassName)
+            content: echo "using storageClassName=$SC"
         - apply:
             resource:
               apiVersion: v1
@@ -24,7 +34,7 @@ spec:
               metadata:
                 name: scratch-pvc
               spec:
-                storageClassName: freeport-sandisk-cruzer
+                storageClassName: ($storageClassName)
                 accessModes: ["ReadWriteOnce"]
                 resources:
                   requests:
@@ -81,18 +91,6 @@ spec:
               fi
               echo "PV=$PV NODE=$NODE"
 
-              EXPECTED_NODE=$(kubectl get nodes -o json | jq -r '
-                [.items[] | select(.metadata.labels["freeport.local/sandisk-cruzer"] == "true") | .metadata.name][0] // "MISSING"
-              ')
-              if [ "$EXPECTED_NODE" = "MISSING" ]; then
-                echo "FAIL: no node currently carries freeport.local/sandisk-cruzer=true — plug a SanDisk Cruzer into some node first" >&2
-                exit 1
-              fi
-              if [ "$NODE" != "$EXPECTED_NODE" ]; then
-                echo "FAIL: expected scheduling onto $EXPECTED_NODE (the only node with freeport.local/sandisk-cruzer), got $NODE" >&2
-                exit 1
-              fi
-
               PV_JSON=$(kubectl get pv "$PV" -o json)
               NODE_JSON=$(kubectl get node "$NODE" -o json)
 
@@ -119,4 +117,4 @@ spec:
                 fi
               done
 
-              echo "PASS: sandisk-cruzer topology followed — PV $PV correctly pinned to node $NODE"
+              echo "PASS: topology followed — PV $PV correctly pinned to node $NODE"

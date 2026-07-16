@@ -1,0 +1,22 @@
+# Copy this to test/chainsaw/values.yaml (gitignored, personal) and fill in
+# the StorageClass names that actually exist on YOUR cluster to run this
+# suite against your own hardware instead of the author's.
+#
+#   cp test/chainsaw/values.yaml.example test/chainsaw/values.yaml
+#   # edit values.yaml
+#   chainsaw test test/chainsaw/ --values test/chainsaw/values.yaml
+#
+# --values is required — the tests have no baked-in fallback, so running
+# without it (or without TEST.sh's values.yaml pickup) fails with a nil
+# binding error rather than silently using the author's storage classes.
+#
+# storageClassName: any StorageClass whose allowedTopologies every node in
+#   your cluster satisfies right now (used by basic-provisioning,
+#   topology-followed-broad, ephemeral-inline-volume).
+# narrowStorageClassName: a StorageClass whose allowedTopologies only SOME
+#   (not all) of your nodes satisfy right now — i.e. a specific device
+#   plugged into a specific node, to prove narrow device classes still
+#   resolve correctly (used by topology-followed-narrow).
+
+storageClassName: freeport-unknown-usb-disk
+narrowStorageClassName: freeport-sandisk-cruzer

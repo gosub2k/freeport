@@ -1,19 +1,24 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: topology-followed
+  name: topology-followed-broad
 spec:
   description: >
-    Verifies the actual topology mechanism end to end, not just that binding
-    happened: the PV backing scratch-pvc must carry a freeport.local/*
-    nodeAffinity requirement, and the node the pod was actually scheduled to
-    must carry a matching freeport.local/<manufacturer>-<model>=true label —
-    the same label pkg/manager sets from live USB device state (see
-    pkg/manager/manager.go's desiredLabels/diffLabels). If this ever passes
-    with an empty requirement list or a node that doesn't satisfy it,
-    topology-based scheduling has silently stopped working. Uses
-    freeport-unknown-usb-disk since every node in this cluster currently
-    reports that class, unlike freeport-generic.
+    Verifies the actual topology mechanism end to end, not just that
+    binding happened: the PV backing scratch-pvc must carry a
+    freeport.local/* nodeAffinity requirement, and the node the pod was
+    actually scheduled to must carry a matching label — the same label
+    pkg/manager sets from live USB device state. If this ever passes with
+    an empty requirement list or a node that doesn't satisfy it,
+    topology-based scheduling has silently stopped working.
+    storageClassName comes from --values (see
+    test/chainsaw/values.yaml.example) — a StorageClass whose
+    allowedTopologies every node in your cluster currently satisfies — so
+    this runs against any cluster's own set of freeport.local
+    StorageClasses, not just the author's.
+  bindings:
+    - name: storageClassName
+      value: ($values.storageClassName)
   timeouts:
     # Real USB-backed unmount (NodeUnpublishVolume) during pod teardown can
     # take well past chainsaw's 30s default cleanup/delete timeouts on
@@ -22,6 +27,13 @@ spec:
     cleanup: 90s
   steps:
     - try:
+        # storageClassName has no fallback — see basic-provisioning's guard
+        # comment for why this must come first and be threaded through env.
+        - script:
+            env:
+              - name: SC
+                value: ($storageClassName)
+            content: echo "using storageClassName=$SC"
         - apply:
             resource:
               apiVersion: v1
@@ -29,7 +41,7 @@ spec:
               metadata:
                 name: scratch-pvc
               spec:
-                storageClassName: freeport-unknown-usb-disk
+                storageClassName: ($storageClassName)
                 accessModes: ["ReadWriteOnce"]
                 resources:
                   requests:
@@ -106,6 +118,11 @@ spec:
                 exit 1
               fi
 
+              # No need to independently recompute "which node should this
+              # have landed on" — if the node actually scheduled to
+              # satisfies every required label, that already proves
+              # topology worked, regardless of how many (or how few) nodes
+              # could have qualified.
               printf '%s\n' "$REQUIRED_KEYS" | while IFS= read -r key; do
                 want=$(printf '%s' "$PV_JSON" | jq -r --arg k "$key" '
                   .spec.nodeAffinity.required.nodeSelectorTerms[]?.matchExpressions[]?

@@ -4,14 +4,15 @@ metadata:
   name: basic-provisioning
 spec:
   description: >
-    PVC provisioning happy path against freeport-unknown-usb-disk — chosen
-    because, unlike freeport-generic (which needs a real "Generic"/"USB Disk
-    2.0" descriptor device), every node in this cluster currently reports a
-    freeport.local/unknown-usb-disk-2.0 device, so this test doesn't depend
-    on which specific USB stick happens to be plugged in where today. A PVC
-    binds, and the pod's own read/write check actually succeeds — the same
-    ground test_integration.py's test_pvc_triggers_createvolume_and_binds_pv
-    / test_shared_volume_read_write cover, in chainsaw's declarative form.
+    PVC provisioning happy path: a PVC binds, and the pod's own read/write
+    check actually succeeds. storageClassName comes from --values (see
+    test/chainsaw/values.yaml.example) — a StorageClass whose
+    allowedTopologies every node in your cluster currently satisfies — so
+    this runs against any cluster's own set of freeport.local
+    StorageClasses, not just the author's.
+  bindings:
+    - name: storageClassName
+      value: ($values.storageClassName)
   timeouts:
     # Real USB-backed unmount (NodeUnpublishVolume) during pod teardown can
     # take well past chainsaw's 30s default cleanup/delete timeouts on
@@ -20,6 +21,19 @@ spec:
     cleanup: 90s
   steps:
     - try:
+        # storageClassName has no fallback — if --values wasn't supplied,
+        # this binding is null, and threading a null through env (which
+        # requires a string) makes chainsaw itself error out here, before
+        # anything gets applied. Without this guard, using the binding
+        # directly in a resource field instead would just silently omit
+        # storageClassName, letting the PVC bind against the cluster's
+        # unrelated default StorageClass and pass without ever touching
+        # this driver.
+        - script:
+            env:
+              - name: SC
+                value: ($storageClassName)
+            content: echo "using storageClassName=$SC"
         - apply:
             resource:
               apiVersion: v1
@@ -27,7 +41,7 @@ spec:
               metadata:
                 name: scratch-pvc
               spec:
-                storageClassName: freeport-unknown-usb-disk
+                storageClassName: ($storageClassName)
                 accessModes: ["ReadWriteOnce"]
                 resources:
                   requests:

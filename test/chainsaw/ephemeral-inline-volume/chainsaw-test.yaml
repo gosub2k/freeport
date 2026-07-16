@@ -11,12 +11,26 @@ spec:
     NodePublishVolume directly from the pod spec's csi.volumeAttributes.
     Deliberately doesn't pin a device class, so it works regardless of
     which node the scheduler happens to pick, since every node in this
-    cluster has at least one device mounted.
+    cluster has at least one device mounted. storageClassName here is just
+    a free-text VolumeContext key for ephemeral volumes — NodePublishVolume
+    only requires it present, it doesn't have to name a real StorageClass —
+    but it's bound from --values anyway for consistency with the other
+    tests, see test/chainsaw/values.yaml.example.
+  bindings:
+    - name: storageClassName
+      value: ($values.storageClassName)
   timeouts:
     delete: 90s
     cleanup: 90s
   steps:
     - try:
+        # storageClassName has no fallback — see basic-provisioning's guard
+        # comment for why this must come first and be threaded through env.
+        - script:
+            env:
+              - name: SC
+                value: ($storageClassName)
+            content: echo "using storageClassName=$SC"
         - apply:
             resource:
               kind: Pod
@@ -30,7 +44,7 @@ spec:
                     csi:
                       driver: freeport.local
                       volumeAttributes:
-                        storageClassName: freeport-generic
+                        storageClassName: ($storageClassName)
                 containers:
                   - name: test-script
                     image: busybox
