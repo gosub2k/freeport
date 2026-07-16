@@ -9,9 +9,9 @@ spec:
     different path from every other test here: no PVC, no PV, no
     provisioner, no topology/scheduling involvement at all. kubelet calls
     NodePublishVolume directly from the pod spec's csi.volumeAttributes.
-    Deliberately doesn't pin a device class (matches test/manual/inline.yaml)
-    so it works regardless of which node the scheduler happens to pick,
-    since every node in this cluster has at least one device mounted.
+    Deliberately doesn't pin a device class, so it works regardless of
+    which node the scheduler happens to pick, since every node in this
+    cluster has at least one device mounted.
   timeouts:
     delete: 90s
     cleanup: 90s

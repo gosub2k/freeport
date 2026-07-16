@@ -7,3 +7,4 @@ scrap_bits_and_pieces
 START_TILT.sh
 TEST.sh
 START_TILT*
+test/manual/cleanup-pod.sh

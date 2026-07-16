@@ -2,9 +2,7 @@
 # no manual kubectl apply needed. This is here so the dev loop has
 # something concrete to watch for testing freeport-sandisk-cruzer, which
 # requires freeport.local/sandisk-cruzer=true — i.e. a real SanDisk Cruzer
-# actually plugged into some node right now. See test/manual/pvcpod-sandisk-cruzer.yaml
-# for the standalone, apply-it-yourself version of this same fixture with
-# fuller test instructions.
+# actually plugged into some node right now.
 #
 # --- How to check it worked ---
 #
