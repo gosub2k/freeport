@@ -65,7 +65,21 @@ func mountDevice(hostRoot string, dev devicescan.Device) string {
 		util.Log.Error("mkdir failed", "path", hostMountpoint, "err", err)
 		return ""
 	}
-	if out, err := exec.Command("mount", dev.DevPath, hostMountpoint).CombinedOutput(); err != nil {
+	// -o sync: these are removable USB sticks that can (and, per how this
+	// manager works, will) get physically unplugged with no warning and no
+	// chance to unmount cleanly first — e.g. mid-migration to another node.
+	// Buffered writes sitting in the page cache at that instant are exactly
+	// what turns "unclean removal" into on-disk corruption; sync forces
+	// every write to commit to the device immediately instead of being
+	// buffered, shrinking that window. This is a generic VFS-level mount
+	// flag (MS_SYNCHRONOUS), not filesystem-specific, so it applies
+	// identically whatever's actually on the stick — vfat, exfat, ext4,
+	// ntfs, ... — unlike fs-specific options (e.g. vfat's "flush") that
+	// would need per-filesystem-type detection and don't generalize.
+	// Trade-off: no write buffering means slower writes and more wear on
+	// flash media — acceptable here since correctness on abrupt removal
+	// matters more than throughput for this driver's use case.
+	if out, err := exec.Command("mount", "-o", "sync", dev.DevPath, hostMountpoint).CombinedOutput(); err != nil {
 		util.Log.Error("mount failed", "dev", dev.DevPath, "mp", hostMountpoint, "err", err, "output", strings.TrimSpace(string(out)))
 		return ""
 	}
