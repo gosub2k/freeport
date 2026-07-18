@@ -186,9 +186,22 @@ func TestSyncTopologyKeys_driverNotRegistered(t *testing.T) {
 	}
 }
 
+// TestSyncTopologyKeys_updatesStaleKeys is a regression test for a real bug
+// found running against a live cluster: the API server rejects a plain
+// Update to CSINodeDriver.TopologyKeys with "field is immutable" — the fake
+// clientset used here doesn't enforce that validation, so this test alone
+// can't catch a regression back to Update; it exists to lock in that the
+// delete+recreate round trip preserves everything it must (OwnerReferences
+// in particular — CSINode's link back to its Node, easy to drop by accident
+// when rebuilding the object from scratch).
 func TestSyncTopologyKeys_updatesStaleKeys(t *testing.T) {
 	csiNode := &storagev1.CSINode{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-a",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: "v1", Kind: "Node", Name: "node-a", UID: "node-a-uid"},
+			},
+		},
 		Spec: storagev1.CSINodeSpec{Drivers: []storagev1.CSINodeDriver{
 			{Name: "other.driver", NodeID: "node-a", TopologyKeys: []string{"other.driver/should-not-be-touched"}},
 			{Name: "freeport.local", NodeID: "node-a", TopologyKeys: []string{"freeport.local/stale-class"}},
@@ -215,6 +228,10 @@ func TestSyncTopologyKeys_updatesStaleKeys(t *testing.T) {
 	otherIdx := driverIndex(got.Spec.Drivers, "other.driver")
 	if otherIdx == -1 || !reflect.DeepEqual(got.Spec.Drivers[otherIdx].TopologyKeys, []string{"other.driver/should-not-be-touched"}) {
 		t.Errorf("other driver's entry was touched: %v", got.Spec.Drivers)
+	}
+
+	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != "node-a-uid" {
+		t.Errorf("OwnerReferences = %v, want the original Node owner reference preserved across the delete+recreate", got.OwnerReferences)
 	}
 }
 

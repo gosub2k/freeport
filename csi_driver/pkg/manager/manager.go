@@ -278,10 +278,26 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []mountedDevice)
 		return nil
 	}
 
-	updated := csiNode.DeepCopy()
-	updated.Spec.Drivers[idx].TopologyKeys = desired
-	util.Log.Info("updating CSINode topology keys", "keys", desired)
-	_, err = m.clientset.StorageV1().CSINodes().Update(ctx, updated, metav1.UpdateOptions{})
+	// TopologyKeys rejects Update with "field is immutable" — confirmed live
+	// (the API server enforces this, it's not just an unset default). The
+	// only way to change it is delete + recreate the whole CSINode object,
+	// same pattern recreatePVForNode already uses for PV's own immutable
+	// nodeAffinity field.
+	newCSINode := csiNode.DeepCopy()
+	newCSINode.Spec.Drivers[idx].TopologyKeys = desired
+	newCSINode.ResourceVersion = ""
+	newCSINode.UID = ""
+	newCSINode.CreationTimestamp = metav1.Time{}
+	newCSINode.ManagedFields = nil
+	newCSINode.Finalizers = nil
+	newCSINode.Generation = 0
+
+	csiNodes := m.clientset.StorageV1().CSINodes()
+	if err := csiNodes.Delete(ctx, m.nodeName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting CSINode %s: %w", m.nodeName, err)
+	}
+	util.Log.Info("recreating CSINode with updated topology keys", "keys", desired)
+	_, err = csiNodes.Create(ctx, newCSINode, metav1.CreateOptions{})
 	return err
 }
 
