@@ -40,6 +40,10 @@ func NewControllerServer(driverName string) *ControllerServer {
 }
 
 // CreateVolume receives the topology selected by the scheduler and echoes it back.
+// The scheduler's chosen device-class segment (e.g.
+// "freeport.local/sandisk-cruzer=true") is forwarded into VolumeContext
+// so NodePublishVolume can disambiguate if a node has more than one
+// device class mounted.
 func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	util.Log.Info("CreateVolume", "name", req.Name, "capacity", req.CapacityRange)
 
@@ -75,10 +79,7 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 	storageClass := req.Parameters["storageClassName"]
 
-	// The scheduler's chosen device-class segment (e.g.
-	// "freeport.local/sandisk-cruzer=true") is forwarded into VolumeContext
-	// so NodePublishVolume can disambiguate if a node has more than one
-	// device class mounted.
+	// Copy the scheduler's selected topology into the volumeContest
 	volumeContext := map[string]string{"storageClassName": storageClass}
 	if selectedTopology != nil {
 		prefix := cs.driverName + "/"
@@ -87,6 +88,8 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 				volumeContext[k] = v
 			}
 		}
+	} else {
+		util.Log.Info("CreateVolume selectedTopology=nil")
 	}
 
 	rec := &volumeRecord{

@@ -147,7 +147,7 @@ func TestDiffLabels(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := diffLabels(tt.current, tt.desired, "freeport.local/")
+			got := nodeLabelPatch(tt.current, tt.desired, "freeport.local/")
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("diffLabels = %v, want %v", got, tt.want)
 			}

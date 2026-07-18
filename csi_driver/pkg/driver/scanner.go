@@ -29,8 +29,7 @@ func (d hostBlockDevice) String() string {
 
 // scanReadyDevices discovers USB devices via devicescan and returns only
 // those already mounted at their canonical mountpoint — i.e. the ones
-// pkg/manager has finished setting up. Devices manager hasn't gotten to yet
-// are silently excluded rather than mounted here.
+// pkg/manager has finished setting up.
 func scanReadyDevices(hostRoot string) []hostBlockDevice {
 	var out []hostBlockDevice
 	for _, d := range devicescan.Discover(hostRoot) {

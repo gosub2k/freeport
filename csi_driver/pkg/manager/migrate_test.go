@@ -90,7 +90,7 @@ func TestEligiblePV(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pv := boundRetainPV("pv-1", "vol-1", "freeport.local", "default", "claim-1")
 			tt.mut(pv)
-			if got := eligiblePV(pv); got != tt.want {
+			if got := isOkToMigrate(pv); got != tt.want {
 				t.Errorf("eligiblePV = %v, want %v", got, tt.want)
 			}
 		})

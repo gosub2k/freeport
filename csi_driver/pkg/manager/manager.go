@@ -1,134 +1,37 @@
-// Package manager discovers USB block devices on a node, mounts them, and
-// keeps that node's Kubernetes labels in sync with what's actually plugged
-// in. It runs as its own DaemonSet, separate from and loosely coupled to the
-// CSI node driver: the driver trusts that any device manager has recognized
-// is already mounted and ready to use.
+// Package manager is glue code between the driver & controller (pure CSI) and Kubernetes.
+// It has three functions:
+// - scan for devices on the node
+// - mount devices onto a consistently named mountpoint
+// - label Node object with devices that are found so that the CSI part will respect the topology constrains in the storage class
+// - act as a migration controller. If it finds a volume directory on device mounted on the node, it will (when appropriate):
+//   - check for pvcs using that pv and any corresponding pods
+//   - recreate the pv, setting node affinity to this node
+//   - delete any pods that are scheduled on a different node and that mount those pvcs
+//     The migration process is intended to allow, for example, StatefulSets using persistent storage to have the storage physically moved to a different node without affecting the number of running replicas.
+//
+// REVISIT: combining these functions into one process or splitting up. There are already several reconcile loops so perhaps its best to aggregate these functions.
 package manager
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
 	"freeport/pkg/devicescan"
 	"freeport/pkg/util"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
-type Manager struct {
-	clientset  kubernetes.Interface
-	nodeName   string
-	hostRoot   string
-	driverName string
+// Utility functions:
 
-	// lastSeen is the mounted-device set from the previous ReconcileOnce
-	// call, keyed by serial, purely so device add/remove transitions can be
-	// logged at Info while steady-state presence stays at Debug. It carries
-	// no correctness weight — losing it (e.g. on a manager restart) just
-	// means the next tick logs every currently-mounted device as "added"
-	// once, which is harmless.
-	lastSeen map[string]mountedDevice
-
-	// mountFailures counts consecutive mount(8) failures per device serial,
-	// so mountAll can stop retrying (and stop logging) a permanently broken
-	// device instead of failing identically forever. See mountAll.
-	mountFailures map[string]int
-
-	// mountFn is mountDevice by default; swappable in tests the same way
-	// pkg/driver's NodeServer makes mountFn/scanFn swappable.
-	mountFn func(hostRoot string, dev devicescan.Device) string
-}
-
-func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) *Manager {
-	return &Manager{
-		clientset:     clientset,
-		nodeName:      nodeName,
-		hostRoot:      hostRoot,
-		driverName:    driverName,
-		lastSeen:      map[string]mountedDevice{},
-		mountFailures: map[string]int{},
-		mountFn:       mountDevice,
-	}
-}
-
-// Run reconciles on every tick until ctx is cancelled. Errors are logged and
-// do not stop the loop — a transient API-server hiccup shouldn't take the
-// manager down.
-func (m *Manager) Run(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	if err := m.ReconcileOnce(ctx); err != nil {
-		util.Log.Error("reconcile failed", "err", err)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := m.ReconcileOnce(ctx); err != nil {
-				util.Log.Error("reconcile failed", "err", err)
-			}
-		}
-	}
-}
-
-// ReconcileOnce scans for devices, mounts any that aren't already mounted,
-// and patches this node's labels to reflect exactly the set of device
-// classes found — adding new ones and removing stale ones in the same pass.
-func (m *Manager) ReconcileOnce(ctx context.Context) error {
-	discovered := devicescan.Discover(m.hostRoot)
-	mounted := m.mountAll(discovered)
-
-	current := map[string]mountedDevice{}
-	for _, d := range mounted {
-		current[d.Serial] = d
-		util.Log.Debug("mounted device", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
-	}
-	added, removed := deviceDelta(m.lastSeen, current)
-	for _, d := range added {
-		util.Log.Info("device added", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
-	}
-	for _, d := range removed {
-		util.Log.Info("device removed", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
-		cleanupMountpoint(m.hostRoot, d.mountpoint)
-	}
-	m.lastSeen = current
-
-	if err := m.migrateStaleVolumes(ctx, mounted); err != nil {
-		util.Log.Error("volume migration failed", "err", err)
-	}
-
-	node, err := m.clientset.CoreV1().Nodes().Get(ctx, m.nodeName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	desired := desiredLabels(m.driverName, mounted)
-	patch := diffLabels(node.Labels, desired, m.driverName+"/")
-	if len(patch) == 0 {
-		return nil
-	}
-
-	body, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"labels": patch},
-	})
-	if err != nil {
-		return err
-	}
-
-	util.Log.Info("patching node labels", "patch", patch)
-	_, err = m.clientset.CoreV1().Nodes().Patch(ctx, m.nodeName, types.MergePatchType, body, metav1.PatchOptions{})
-	return err
-}
-
-// deviceDelta returns the devices present in current but not prev (added)
-// and vice versa (removed), keyed by serial, so ReconcileOnce can log only
-// transitions at Info instead of every mounted device on every tick.
+// deviceDelta returns the devices added and removed.
 func deviceDelta(prev, current map[string]mountedDevice) (added, removed []mountedDevice) {
 	for serial, d := range current {
 		if _, ok := prev[serial]; !ok {
@@ -154,11 +57,11 @@ func desiredLabels(driverName string, devices []mountedDevice) map[string]string
 	return labels
 }
 
-// diffLabels compares a node's current labels against the desired set and
+// nodeLabelPatch compares a node's current labels against the desired set and
 // returns a patch: new/changed keys map to their desired value, and any
 // existing key under prefix that's absent from desired maps to nil (JSON
 // merge-patch delete). Labels outside prefix are never touched.
-func diffLabels(current, desired map[string]string, prefix string) map[string]any {
+func nodeLabelPatch(current, desired map[string]string, prefix string) map[string]any {
 	patch := map[string]any{}
 	for k, v := range desired {
 		if current[k] != v {
@@ -174,4 +77,280 @@ func diffLabels(current, desired map[string]string, prefix string) map[string]an
 		}
 	}
 	return patch
+}
+
+// Manager struct:
+
+type Manager struct {
+	clientset  kubernetes.Interface
+	nodeName   string
+	hostRoot   string
+	driverName string
+
+	// lastSeen is the mounted-device set from the previous ReconcileOnce
+	// call, keyed by serial,.
+	lastSeen map[string]mountedDevice
+
+	// mountFailures counts consecutive mount(8) failures per device serial,
+	// per manager instance, so mountAll can stop avoid failing identically forever.
+	mountFailures map[string]int
+
+	// mountFn is mountDevice by default; swappable in tests.
+	mountFn func(hostRoot string, dev devicescan.Device) string
+}
+
+// New returns a new Manager.
+func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) *Manager {
+	return &Manager{
+		clientset:     clientset,
+		nodeName:      nodeName,
+		hostRoot:      hostRoot,
+		driverName:    driverName,
+		lastSeen:      map[string]mountedDevice{},
+		mountFailures: map[string]int{},
+		mountFn:       mountDevice,
+	}
+}
+
+// listPVsByVolumeHandle indexes every PV owned by the driver component by its CSI
+// volume handle.
+func (m *Manager) listPVsByVolumeHandle(ctx context.Context) (map[string]*corev1.PersistentVolume, error) {
+	list, err := m.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	byHandle := map[string]*corev1.PersistentVolume{}
+	for i := range list.Items {
+		pv := &list.Items[i]
+		if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != m.driverName {
+			continue
+		}
+		byHandle[pv.Spec.CSI.VolumeHandle] = pv
+	}
+	return byHandle, nil
+}
+
+// recreatePVForNode recreates PV with mutated node affinity.
+func (m *Manager) recreatePVForNode(ctx context.Context, pv *corev1.PersistentVolume) (*corev1.PersistentVolume, error) {
+	pvs := m.clientset.CoreV1().PersistentVolumes()
+
+	fresh, err := pvs.Get(ctx, pv.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("re-fetching PV %s before finalizer strip: %w", pv.Name, err)
+	}
+	var kept []string
+	for _, f := range fresh.Finalizers {
+		if f != pvProtectionFinalizer {
+			kept = append(kept, f)
+		}
+	}
+	fresh.Finalizers = kept
+	fresh, err = pvs.Update(ctx, fresh, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("stripping finalizer on PV %s: %w", pv.Name, err)
+	}
+
+	newPV := fresh.DeepCopy()
+	newPV.ResourceVersion = ""
+	newPV.UID = ""
+	newPV.CreationTimestamp = metav1.Time{}
+	newPV.ManagedFields = nil
+	newPV.Finalizers = nil
+	newPV.Generation = 0
+	newPV.Status = corev1.PersistentVolumeStatus{}
+	pinNodeAffinity(newPV, m.nodeName)
+
+	if err := pvs.Delete(ctx, pv.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("deleting PV %s: %w", pv.Name, err)
+	}
+	created, err := pvs.Create(ctx, newPV, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("recreating PV %s: %w", pv.Name, err)
+	}
+	return created, nil
+}
+
+// bouncePod deletes pod gracefully so kubelet completes the normal volume
+// teardown with NodeUnpublishVolume on current node before object removed.
+func (m *Manager) bouncePod(ctx context.Context, pod *corev1.Pod) error {
+	if len(pod.OwnerReferences) == 0 {
+		// There is no controller so decide to leave it alone - nothing will recreate it.
+		// REVISIT: the manager here could here act as the controller.
+		util.Log.Error("bare pod using migrated device, refusing to delete — manual intervention required",
+			"pod", pod.Namespace+"/"+pod.Name, "podNode", pod.Spec.NodeName)
+		return nil
+	}
+	return m.clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+}
+
+// listPods returns a list of all the pods in the given namespace.
+func (m *Manager) listPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
+	list, err := m.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// migrateStaleVolumes scans every mounted device's volume directories and,
+// for any that belong to a Bound, Retain-policy PV whose claim's pod is
+// running on a different node, deletes and recreates that PV pinned to this
+// node and deletes the pod so its controller can reschedule it here.
+func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []mountedDevice) error {
+	if len(mounted) == 0 {
+		return nil
+	}
+
+	pvsByHandle, err := m.listPVsByVolumeHandle(ctx)
+	if err != nil {
+		return err
+	}
+
+	podsByNamespace := map[string][]corev1.Pod{}
+
+	for _, d := range mounted {
+		dirs, err := volumeDirs(m.hostRoot, d.mountpoint)
+		if err != nil {
+			util.Log.Error("cannot list volume dirs", "mountpoint", d.mountpoint, "err", err)
+			continue
+		}
+		for _, dirName := range dirs {
+			pv, ok := pvsByHandle[dirName]
+			if !ok {
+				continue // no PV claims this directory (e.g. lost+found) — not ours
+			}
+			if !isOkToMigrate(pv) {
+				continue // eligiblePV already logged why
+			}
+
+			ns, claimName := pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name
+			pods, ok := podsByNamespace[ns]
+			if !ok {
+				pods, err = m.listPods(ctx, ns)
+				if err != nil {
+					util.Log.Error("listing pods for claim failed", "namespace", ns, "claim", claimName, "err", err)
+					continue
+				}
+				podsByNamespace[ns] = pods
+			}
+
+			toBounce := podsToBounce(pods, claimName, m.nodeName)
+			if len(toBounce) == 0 {
+				continue // already correctly placed, pending, or terminating — no-op
+			}
+
+			newPV, err := m.recreatePVForNode(ctx, pv)
+			if err != nil {
+				util.Log.Error("PV recreation failed", "pv", pv.Name, "err", err)
+				continue
+			}
+			util.Log.Info("recreated PV for migrated device", "pv", newPV.Name)
+
+			for i := range toBounce {
+				if err := m.bouncePod(ctx, &toBounce[i]); err != nil {
+					util.Log.Error("bouncing pod failed", "pod", toBounce[i].Namespace+"/"+toBounce[i].Name, "err", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// mountAll attempts to mount every discovered device, keyed by DevPath.
+func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
+	seen := map[string]bool{}
+	var mounted []mountedDevice
+	for _, d := range discovered {
+		seen[d.DevPath] = true
+		if m.mountFailures[d.DevPath] >= maxMountFailures {
+			continue
+		}
+		mp := m.mountFn(m.hostRoot, d)
+		if mp == "" {
+			m.mountFailures[d.DevPath]++
+			if m.mountFailures[d.DevPath] == maxMountFailures {
+				util.Log.Error("mount failed repeatedly, giving up until device is removed and reinserted",
+					"dev", d.DevPath, "failures", maxMountFailures)
+			}
+			continue
+		}
+		delete(m.mountFailures, d.DevPath)
+		mounted = append(mounted, mountedDevice{Device: d, mountpoint: mp, free: getDf(mp)})
+	}
+	for devPath := range m.mountFailures {
+		if !seen[devPath] {
+			delete(m.mountFailures, devPath)
+		}
+	}
+	return mounted
+}
+
+// ReconcileOnce scans for devices, mounts any that aren't already mounted,
+// and patches this node's labels to reflect exactly the set of device
+// classes found.
+func (m *Manager) ReconcileOnce(ctx context.Context) error {
+	discovered := devicescan.Discover(m.hostRoot)
+	mounted := m.mountAll(discovered)
+
+	current := map[string]mountedDevice{} // Serial -> mountedDevice
+	for _, d := range mounted {
+		current[d.Serial] = d
+		// TODO: make sure log level is above DEBUG
+		util.Log.Debug("mounted device", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+	}
+	added, removed := deviceDelta(m.lastSeen, current)
+	for _, d := range added {
+		util.Log.Info("device added", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+	}
+	for _, d := range removed {
+		util.Log.Info("device removed", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+		cleanupMountpoint(m.hostRoot, d.mountpoint)
+	}
+	m.lastSeen = current
+
+	if err := m.migrateStaleVolumes(ctx, mounted); err != nil {
+		util.Log.Error("volume migration failed", "err", err)
+	}
+
+	node, err := m.clientset.CoreV1().Nodes().Get(ctx, m.nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	desired := desiredLabels(m.driverName, mounted)
+	patch := nodeLabelPatch(node.Labels, desired, m.driverName+"/")
+	if len(patch) == 0 {
+		return nil
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"labels": patch},
+	})
+	if err != nil {
+		return err
+	}
+
+	util.Log.Info("patching node labels", "patch", patch)
+	_, err = m.clientset.CoreV1().Nodes().Patch(ctx, m.nodeName, types.MergePatchType, body, metav1.PatchOptions{})
+	return err
+}
+
+// Run reconciles on every tick until ctx is cancelled.
+func (m *Manager) Run(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	if err := m.ReconcileOnce(ctx); err != nil {
+		util.Log.Error("reconcile failed", "err", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := m.ReconcileOnce(ctx); err != nil {
+				util.Log.Error("reconcile failed", "err", err)
+			}
+		}
+	}
 }

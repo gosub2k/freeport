@@ -12,11 +12,7 @@ import (
 	"freeport/pkg/util"
 )
 
-// maxMountFailures caps how many times mountAll retries a device that keeps
-// failing to mount before giving up on it silently. Without this, a
-// permanently broken device (wrong/corrupt filesystem, dead media, ...)
-// would retry and log an identical mount failure every reconcile tick
-// forever.
+// maxMountFailures caps how many times mountAll retries.
 const maxMountFailures = 3
 
 func getDf(mountpoint string) int64 {
@@ -27,13 +23,9 @@ func getDf(mountpoint string) int64 {
 	return int64(st.Bavail) * st.Bsize
 }
 
-// isSwapPartition reports whether devPath is formatted as Linux swap, via
-// blkid's on-disk superblock signature detection — sysfs exposes no fs-type
-// attribute for an unmounted partition, so this is the standard way to know
-// without attempting (and predictably failing) a real mount(8) call first.
-// blkid failing or reporting an empty/unknown type is not treated as swap —
-// mountDevice's normal mount attempt remains the fallback in that case.
+// isSwapPartition reports whether devPath is formatted as Linux swap.
 func isSwapPartition(devPath string) bool {
+	// Sysfs doesn't report fs type if its not mounted, use command.
 	out, err := exec.Command("blkid", "-o", "value", "-s", "TYPE", devPath).Output()
 	if err != nil {
 		return false
@@ -47,9 +39,6 @@ func isSwapType(blkidOutput string) bool {
 
 // mountDevice ensures dev is mounted at its canonical host mountpoint.
 // Returns the host-absolute mountpoint, or "" on failure.
-//
-// TODO: auto-format unrecognized filesystems before mounting. Today this
-// assumes every device already carries a filesystem mkfs would have written.
 func mountDevice(hostRoot string, dev devicescan.Device) string {
 	if mp, ok := devicescan.MountedAt(hostRoot, dev.DevPath); ok {
 		return mp
@@ -65,21 +54,9 @@ func mountDevice(hostRoot string, dev devicescan.Device) string {
 		util.Log.Error("mkdir failed", "path", hostMountpoint, "err", err)
 		return ""
 	}
-	// -o sync: these are removable USB sticks that can (and, per how this
-	// manager works, will) get physically unplugged with no warning and no
-	// chance to unmount cleanly first — e.g. mid-migration to another node.
-	// Buffered writes sitting in the page cache at that instant are exactly
-	// what turns "unclean removal" into on-disk corruption; sync forces
-	// every write to commit to the device immediately instead of being
-	// buffered, shrinking that window. This is a generic VFS-level mount
-	// flag (MS_SYNCHRONOUS), not filesystem-specific, so it applies
-	// identically whatever's actually on the stick — vfat, exfat, ext4,
-	// ntfs, ... — unlike fs-specific options (e.g. vfat's "flush") that
-	// would need per-filesystem-type detection and don't generalize.
-	// Trade-off: no write buffering means slower writes and more wear on
-	// flash media — acceptable here since correctness on abrupt removal
-	// matters more than throughput for this driver's use case.
-	if out, err := exec.Command("mount", "-o", "sync", dev.DevPath, hostMountpoint).CombinedOutput(); err != nil {
+
+	// REVISIT: consider mounting with -o sync to reduce chance of dirty filesystem if media removed.
+	if out, err := exec.Command("mount" /* "-o", "sync", */, dev.DevPath, hostMountpoint).CombinedOutput(); err != nil {
 		util.Log.Error("mount failed", "dev", dev.DevPath, "mp", hostMountpoint, "err", err, "output", strings.TrimSpace(string(out)))
 		return ""
 	}
@@ -95,52 +72,8 @@ type mountedDevice struct {
 	free       int64
 }
 
-// mountAll attempts to mount every discovered device, keyed by DevPath (not
-// Serial — a single physical USB stick can carry multiple partitions, e.g.
-// one valid filesystem plus a stray/uninitialized one, and they all share
-// one Serial from the common USB sysfs node; keying by Serial would let a
-// sibling partition's success reset a genuinely broken partition's failure
-// count on every tick, so it would never actually hit the cap) in
-// m.mountFailures, to skip (without re-attempting or re-logging) any
-// partition that has already failed maxMountFailures times in a row. A
-// partition's failure count is cleared once it mounts successfully, or once
-// it's no longer discovered at all (unplugged) — so a later reinsertion (or
-// a replacement device that happens to reuse the same path) gets a fresh
-// set of attempts rather than being permanently blacklisted.
-func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
-	seen := map[string]bool{}
-	var mounted []mountedDevice
-	for _, d := range discovered {
-		seen[d.DevPath] = true
-		if m.mountFailures[d.DevPath] >= maxMountFailures {
-			continue
-		}
-		mp := m.mountFn(m.hostRoot, d)
-		if mp == "" {
-			m.mountFailures[d.DevPath]++
-			if m.mountFailures[d.DevPath] == maxMountFailures {
-				util.Log.Error("mount failed repeatedly, giving up until device is removed and reinserted",
-					"dev", d.DevPath, "failures", maxMountFailures)
-			}
-			continue
-		}
-		delete(m.mountFailures, d.DevPath)
-		mounted = append(mounted, mountedDevice{Device: d, mountpoint: mp, free: getDf(mp)})
-	}
-	for devPath := range m.mountFailures {
-		if !seen[devPath] {
-			delete(m.mountFailures, devPath)
-		}
-	}
-	return mounted
-}
-
 // cleanupMountpoint unmounts and removes the canonical mountpoint directory
-// left behind by a device that has just been unplugged. It refuses to
-// remove a non-empty directory: that means either the unmount above failed
-// (so this is still the device's real filesystem content) or something else
-// is wrong, and either way silently deleting whatever's in it is exactly
-// what must not happen.
+// left behind by a device that has just been unplugged.
 func cleanupMountpoint(hostRoot, mountpoint string) {
 	hostMountpoint := filepath.Join(hostRoot, mountpoint)
 

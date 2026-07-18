@@ -15,6 +15,42 @@ import (
 	"freeport/pkg/util"
 )
 
+// Testing utility functions:
+
+// WithNoScan replaces USB device scanning with a no-op. Use in tests.
+func WithNoScan() func(*NodeServer) {
+	return func(ns *NodeServer) {
+		ns.scanFn = func(string) []hostBlockDevice { return nil }
+	}
+}
+
+// WithFakeDevice replaces the scanner with one that returns a single synthetic
+// device whose mountpoint is mountpointDir. Use in tests.
+func WithFakeDevice(mountpointDir string) func(*NodeServer) {
+	return func(ns *NodeServer) {
+		ns.scanFn = func(string) []hostBlockDevice {
+			return []hostBlockDevice{{
+				serial:       "test-serial",
+				manufacturer: "Test Co",
+				model:        "Test USB",
+				partition:    1,
+				mountpoint:   mountpointDir,
+			}}
+		}
+	}
+}
+
+// WithNoMount replaces syscall.Mount with a no-op. Use in tests where bind mounts are not available.
+func WithNoMount() func(*NodeServer) {
+	return func(ns *NodeServer) {
+		ns.mountFn = func(source, target, fstype string, flags uintptr, data string) error {
+			return nil
+		}
+	}
+}
+
+// NodeServer struct
+
 type NodeServer struct {
 	csi.UnimplementedNodeServer
 	hostRoot   string
@@ -37,41 +73,6 @@ func NewNodeServer(nodeID, hostRoot, driverName string, opts ...func(*NodeServer
 		opt(ns)
 	}
 	return ns
-}
-
-// WithNoScan replaces USB device scanning with a no-op. Use in tests where no
-// real USB hardware is present and sysfs/devfs access should be avoided.
-func WithNoScan() func(*NodeServer) {
-	return func(ns *NodeServer) {
-		ns.scanFn = func(string) []hostBlockDevice { return nil }
-	}
-}
-
-// WithFakeDevice replaces the scanner with one that returns a single synthetic
-// device whose mountpoint is mountpointDir. Use in tests together with
-// WithNoMount to exercise the full publish/unpublish flow without hardware.
-func WithFakeDevice(mountpointDir string) func(*NodeServer) {
-	return func(ns *NodeServer) {
-		ns.scanFn = func(string) []hostBlockDevice {
-			return []hostBlockDevice{{
-				serial:       "test-serial",
-				manufacturer: "Test Co",
-				model:        "Test USB",
-				partition:    1,
-				mountpoint:   mountpointDir,
-			}}
-		}
-	}
-}
-
-// WithNoMount replaces syscall.Mount with a no-op. Use in tests running without
-// CAP_SYS_ADMIN where bind mounts are not available.
-func WithNoMount() func(*NodeServer) {
-	return func(ns *NodeServer) {
-		ns.mountFn = func(source, target, fstype string, flags uintptr, data string) error {
-			return nil
-		}
-	}
 }
 
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
