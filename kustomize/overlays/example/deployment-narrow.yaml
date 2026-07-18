@@ -73,10 +73,15 @@ spec:
       containers:
         - name: writer
           image: busybox
+          env:
+            - name: K8S_NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           command:
             - "sh"
             - "-c"
-            - "while true; do date; sleep 1; done >> /data/log.txt"
+            - "while true; do echo $(date) $K8S_NODE $(uname -n); sleep 1; done >> /data/log.txt"
           volumeMounts:
           - mountPath: "/data"
             name: scratch-pv
