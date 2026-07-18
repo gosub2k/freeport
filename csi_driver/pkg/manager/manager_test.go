@@ -1,9 +1,14 @@
 package manager
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"testing"
+
+	storagev1 "k8s.io/api/storage/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"freeport/pkg/devicescan"
 )
@@ -152,5 +157,84 @@ func TestDiffLabels(t *testing.T) {
 				t.Errorf("diffLabels = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSyncTopologyKeys_noCSINode(t *testing.T) {
+	m := &Manager{clientset: fake.NewSimpleClientset(), nodeName: "node-a", driverName: "freeport.local"}
+
+	if err := m.syncTopologyKeys(context.Background(), nil); err != nil {
+		t.Fatalf("syncTopologyKeys = %v, want nil (registrar hasn't created CSINode yet)", err)
+	}
+}
+
+func TestSyncTopologyKeys_driverNotRegistered(t *testing.T) {
+	csiNode := &storagev1.CSINode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Spec:       storagev1.CSINodeSpec{Drivers: []storagev1.CSINodeDriver{{Name: "other.driver", NodeID: "node-a"}}},
+	}
+	clientset := fake.NewSimpleClientset(csiNode)
+	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
+
+	if err := m.syncTopologyKeys(context.Background(), nil); err != nil {
+		t.Fatalf("syncTopologyKeys = %v, want nil", err)
+	}
+
+	got, _ := clientset.StorageV1().CSINodes().Get(context.Background(), "node-a", metav1.GetOptions{})
+	if len(got.Spec.Drivers) != 1 || got.Spec.Drivers[0].Name != "other.driver" {
+		t.Errorf("Drivers = %v, want the unrelated entry left untouched", got.Spec.Drivers)
+	}
+}
+
+func TestSyncTopologyKeys_updatesStaleKeys(t *testing.T) {
+	csiNode := &storagev1.CSINode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Spec: storagev1.CSINodeSpec{Drivers: []storagev1.CSINodeDriver{
+			{Name: "other.driver", NodeID: "node-a", TopologyKeys: []string{"other.driver/should-not-be-touched"}},
+			{Name: "freeport.local", NodeID: "node-a", TopologyKeys: []string{"freeport.local/stale-class"}},
+		}},
+	}
+	clientset := fake.NewSimpleClientset(csiNode)
+	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
+
+	mounted := []mountedDevice{{Device: devicescan.Device{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}}
+	if err := m.syncTopologyKeys(context.Background(), mounted); err != nil {
+		t.Fatalf("syncTopologyKeys = %v", err)
+	}
+
+	got, _ := clientset.StorageV1().CSINodes().Get(context.Background(), "node-a", metav1.GetOptions{})
+	idx := driverIndex(got.Spec.Drivers, "freeport.local")
+	if idx == -1 {
+		t.Fatalf("freeport.local entry disappeared: %v", got.Spec.Drivers)
+	}
+	want := []string{"freeport.local/sandisk-cruzer"}
+	if !reflect.DeepEqual(got.Spec.Drivers[idx].TopologyKeys, want) {
+		t.Errorf("TopologyKeys = %v, want %v", got.Spec.Drivers[idx].TopologyKeys, want)
+	}
+
+	otherIdx := driverIndex(got.Spec.Drivers, "other.driver")
+	if otherIdx == -1 || !reflect.DeepEqual(got.Spec.Drivers[otherIdx].TopologyKeys, []string{"other.driver/should-not-be-touched"}) {
+		t.Errorf("other driver's entry was touched: %v", got.Spec.Drivers)
+	}
+}
+
+func TestSyncTopologyKeys_noopWhenAlreadyCurrent(t *testing.T) {
+	csiNode := &storagev1.CSINode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "1"},
+		Spec: storagev1.CSINodeSpec{Drivers: []storagev1.CSINodeDriver{
+			{Name: "freeport.local", NodeID: "node-a", TopologyKeys: []string{"freeport.local/sandisk-cruzer"}},
+		}},
+	}
+	clientset := fake.NewSimpleClientset(csiNode)
+	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
+
+	mounted := []mountedDevice{{Device: devicescan.Device{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}}
+	if err := m.syncTopologyKeys(context.Background(), mounted); err != nil {
+		t.Fatalf("syncTopologyKeys = %v", err)
+	}
+
+	got, _ := clientset.StorageV1().CSINodes().Get(context.Background(), "node-a", metav1.GetOptions{})
+	if got.ResourceVersion != "1" {
+		t.Errorf("ResourceVersion changed to %q, want unchanged \"1\" — an Update call happened when it shouldn't have", got.ResourceVersion)
 	}
 }

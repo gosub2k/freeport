@@ -16,6 +16,14 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  # CSINode is normally registrar-owned, but node-driver-registrar only
+  # calls NodeGetInfo once at driver-pod startup, freezing whatever topology
+  # it saw then — this manager keeps CSINode's topologyKeys current on every
+  # reconcile tick instead (see pkg/manager/topologykeys.go). It only ever
+  # updates an existing driver entry's TopologyKeys field, never creates one.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch", "update"]
   # SECURITY-RELEVANT: cluster-wide PV and Pod access, for device migration
   # (see pkg/manager/migrate.go). This DaemonSet is already privileged /
   # hostPID / host-root on every node it runs on, so this doesn't cross a new

@@ -1,5 +1,5 @@
 // Package manager is glue code between the driver & controller (pure CSI) and Kubernetes.
-// It has three functions:
+// It has FIVE functions:
 // - scan for devices on the node
 // - mount devices onto a consistently named mountpoint
 // - label Node object with devices that are found so that the CSI part will respect the topology constrains in the storage class
@@ -9,6 +9,7 @@
 //   - delete any pods that are scheduled on a different node and that mount those pvcs
 //     The migration process is intended to allow, for example, StatefulSets using persistent storage to have the storage physically moved to a different node without affecting the number of running replicas.
 //
+// - sync the topology keys on the CSINode object with the devices that are currently on the node. This doesn't happen naturally because k8s only calls GetNodeInfo RPC once on each node when the socket is created.
 // REVISIT: combining these functions into one process or splitting up. There are already several reconcile loops so perhaps its best to aggregate these functions.
 package manager
 
@@ -256,6 +257,34 @@ func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []mountedDevi
 	return nil
 }
 
+// syncTopologyKeys keeps this node's CSINode driver entry's topologyKeys in
+// sync with whichever devices are currently mounted.
+func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []mountedDevice) error {
+	csiNode, err := m.clientset.StorageV1().CSINodes().Get(ctx, m.nodeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // node-driver-registrar hasn't registered this node yet
+		}
+		return err
+	}
+
+	idx := driverIndex(csiNode.Spec.Drivers, m.driverName)
+	if idx == -1 {
+		return nil // registrar hasn't registered this driver on this node yet
+	}
+
+	desired := desiredTopologyKeys(m.driverName, mounted)
+	if topologyKeysEqual(csiNode.Spec.Drivers[idx].TopologyKeys, desired) {
+		return nil
+	}
+
+	updated := csiNode.DeepCopy()
+	updated.Spec.Drivers[idx].TopologyKeys = desired
+	util.Log.Info("updating CSINode topology keys", "keys", desired)
+	_, err = m.clientset.StorageV1().CSINodes().Update(ctx, updated, metav1.UpdateOptions{})
+	return err
+}
+
 // mountAll attempts to mount every discovered device, keyed by DevPath.
 func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
 	seen := map[string]bool{}
@@ -310,6 +339,10 @@ func (m *Manager) ReconcileOnce(ctx context.Context) error {
 
 	if err := m.migrateStaleVolumes(ctx, mounted); err != nil {
 		util.Log.Error("volume migration failed", "err", err)
+	}
+
+	if err := m.syncTopologyKeys(ctx, mounted); err != nil {
+		util.Log.Error("syncing CSINode topology keys failed", "err", err)
 	}
 
 	node, err := m.clientset.CoreV1().Nodes().Get(ctx, m.nodeName, metav1.GetOptions{})

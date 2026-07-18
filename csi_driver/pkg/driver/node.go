@@ -11,7 +11,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"freeport/pkg/devicescan"
 	"freeport/pkg/util"
 )
 
@@ -173,24 +172,10 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
+// NodeGetInfo deliberately reports no AccessibleTopology. The manager component is responsible for updating the CSINode.
 func (ns *NodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	util.Log.Debug("NodeGetInfo", "nodeID", ns.nodeID)
-
-	devices := ns.scanFn(ns.hostRoot)
-	segments := map[string]string{}
-	for _, dev := range devices {
-		segments[ns.driverName+"/"+devicescan.DeviceClassKey(dev.manufacturer, dev.model)] = "true"
-	}
-
-	for _, dev := range devices {
-		util.Log.Info(dev.String())
-	}
-	resp := &csi.NodeGetInfoResponse{NodeId: ns.nodeID}
-	if len(segments) > 0 {
-		resp.AccessibleTopology = &csi.Topology{Segments: segments}
-	}
-
-	return resp, nil
+	return &csi.NodeGetInfoResponse{NodeId: ns.nodeID}, nil
 }
 
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
