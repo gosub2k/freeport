@@ -238,4 +238,40 @@ func TestMountedAt(t *testing.T) {
 			t.Errorf("MountedAt = ok, want not-ok")
 		}
 	})
+
+	// Regression test for a real bug found on a live cluster: mount tables
+	// with tens of thousands of stacked duplicate mounts, because this
+	// idempotency check never actually matched anything.
+	//
+	// Discover() resolves DevPath by calling filepath.EvalSymlinks on a path
+	// already joined with hostRoot (e.g. "<hostRoot>/dev/disk/by-id/usb-...-part1"),
+	// so the resolved DevPath comes back hostRoot-prefixed too (e.g.
+	// "<hostRoot>/dev/sdb1"). But /proc/1/mounts is PID 1's own mount table —
+	// PID 1 is the real host's init, not something living inside our
+	// container's bind-mounted hostRoot view — so the source device it
+	// records is the bare host path ("/dev/sdb1"), never hostRoot-prefixed.
+	// Comparing those two directly, as the previous implementation did,
+	// means the two forms can never match: mountDevice's "already mounted?"
+	// check always said no, so it mounted again every single reconcile
+	// tick, forever, stacking one more duplicate mount on top each time.
+	t.Run("matches a hostRoot-prefixed devPath against the bare host path /proc/1/mounts actually records", func(t *testing.T) {
+		tmp := t.TempDir()
+		procDir := filepath.Join(tmp, "proc/1")
+		if err := os.MkdirAll(procDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// What PID 1 (the real host) actually sees: no hostRoot prefix.
+		mounts := "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
+		if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte(mounts), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// What Discover() actually hands mountDevice/MountedAt: hostRoot-prefixed.
+		devPath := filepath.Join(tmp, "/dev/sdb1")
+
+		mp, ok := MountedAt(tmp, devPath)
+		if !ok || mp != "/mnt/k8s-freeport-SN123" {
+			t.Errorf("MountedAt(%q, %q) = (%q, %v), want (%q, true)", tmp, devPath, mp, ok, "/mnt/k8s-freeport-SN123")
+		}
+	})
 }

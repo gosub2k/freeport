@@ -3,6 +3,7 @@ package driver
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,7 +54,12 @@ func TestScanReadyDevices(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		mounts := realDev1 + " /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
+		// /proc/1/mounts belongs to PID 1 — the real host's own init, with no
+		// notion of our hostRoot bind-mount prefix — so it always records
+		// the bare host path, never the tmp(hostRoot)-prefixed one Discover()
+		// resolves realDev1 to. See devicescan.MountedAt's doc comment.
+		bareDev1 := strings.TrimPrefix(realDev1, tmp)
+		mounts := bareDev1 + " /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
 		if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte(mounts), 0644); err != nil {
 			t.Fatal(err)
 		}
