@@ -169,15 +169,7 @@ func Discover(hostRoot string) []Device {
 }
 
 // MountedAt parses hostRoot's /proc/1/mounts and reports the mountpoint
-// recorded for devPath, if any. Shared by manager (idempotent pre-mount
-// check) and driver (readiness gate) so the parsing logic never drifts.
-//
-// devPath is expected hostRoot-prefixed, since that's what Discover() always
-// produces (it resolves symlinks starting from a hostRoot-joined path). But
-// /proc/1/mounts belongs to PID 1 — the real host's own init process, with
-// no notion of our container's bind-mounted hostRoot prefix — so every
-// source device it records is the bare host path. Comparing the two forms
-// directly would never match anything: strip the prefix first.
+// recorded for devPath, if any.
 func MountedAt(hostRoot, devPath string) (mountpoint string, ok bool) {
 	procMounts := filepath.Join(hostRoot, "/proc/1/mounts")
 	f, err := os.Open(procMounts)
