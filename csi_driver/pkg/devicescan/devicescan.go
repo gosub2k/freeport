@@ -4,6 +4,7 @@
 package devicescan
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -151,4 +152,26 @@ func Discover(hostRoot string) []Device {
 		}
 	}
 	return devs
+}
+
+// MountedAt parses hostRoot's /proc/1/mounts and reports the mountpoint
+// recorded for devPath, if any.
+func MountedAt(hostRoot, devPath string) (mountpoint string, ok bool) {
+	procMounts := filepath.Join(hostRoot, "/proc/1/mounts")
+	f, err := os.Open(procMounts)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	bareDevPath := strings.TrimPrefix(devPath, hostRoot)
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		parts := strings.Fields(sc.Text())
+		if len(parts) >= 2 && parts[0] == bareDevPath {
+			return parts[1], true
+		}
+	}
+	return "", false
 }

@@ -31,6 +31,7 @@ import (
 )
 
 // Utility functions:
+/////////////////////
 
 // deviceDelta returns the devices added and removed.
 func deviceDelta(prev, current map[string]mountedDevice) (added, removed []mountedDevice) {
@@ -47,12 +48,11 @@ func deviceDelta(prev, current map[string]mountedDevice) (added, removed []mount
 	return added, removed
 }
 
-// desiredLabels returns the full set of "<driverName>/<manufacturer>-<model>=true"
-// labels this node should carry given the devices currently mounted.
+// desiredLabels returns the full set of device labels this Node should carry
 func desiredLabels(driverName string, devices []mountedDevice) map[string]string {
 	labels := map[string]string{}
 	for _, d := range devices {
-		key := driverName + "/" + devicescan.DeviceClassKey(d.Manufacturer, d.Model)
+		key := driverName + "/" + devicescan.DeviceLabel(d.Manufacturer, d.Model)
 		labels[key] = "true"
 	}
 	return labels
@@ -60,8 +60,7 @@ func desiredLabels(driverName string, devices []mountedDevice) map[string]string
 
 // nodeLabelPatch compares a node's current labels against the desired set and
 // returns a patch: new/changed keys map to their desired value, and any
-// existing key under prefix that's absent from desired maps to nil (JSON
-// merge-patch delete). Labels outside prefix are never touched.
+// existing key under prefix that's absent from desired maps to nil (deletes it)
 func nodeLabelPatch(current, desired map[string]string, prefix string) map[string]any {
 	patch := map[string]any{}
 	for k, v := range desired {
@@ -81,6 +80,7 @@ func nodeLabelPatch(current, desired map[string]string, prefix string) map[strin
 }
 
 // Manager struct:
+//////////////////
 
 type Manager struct {
 	clientset  kubernetes.Interface
@@ -113,8 +113,7 @@ func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) 
 	}
 }
 
-// listPVsByVolumeHandle indexes every PV owned by the driver component by its CSI
-// volume handle.
+// listPVsByVolumeHandle return map of CSI VolumeHandle -> PersistentVolume object
 func (m *Manager) listPVsByVolumeHandle(ctx context.Context) (map[string]*corev1.PersistentVolume, error) {
 	list, err := m.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -131,7 +130,7 @@ func (m *Manager) listPVsByVolumeHandle(ctx context.Context) (map[string]*corev1
 	return byHandle, nil
 }
 
-// recreatePVForNode recreates PV with mutated node affinity.
+// recreatePVForNode recreates PV with mutated node affinity, ie to the node this instance is running on.
 func (m *Manager) recreatePVForNode(ctx context.Context, pv *corev1.PersistentVolume) (*corev1.PersistentVolume, error) {
 	pvs := m.clientset.CoreV1().PersistentVolumes()
 
@@ -240,14 +239,16 @@ func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []mountedDevi
 				continue // already correctly placed, pending, or terminating — no-op
 			}
 
+			util.Log.Info("RECREATING PV on this node", "pv", pv.Name)
 			newPV, err := m.recreatePVForNode(ctx, pv)
 			if err != nil {
 				util.Log.Error("PV recreation failed", "pv", pv.Name, "err", err)
 				continue
 			}
-			util.Log.Info("recreated PV for migrated device", "pv", newPV.Name)
+			util.Log.Info("recreated", "pv", newPV.Name)
 
 			for i := range toBounce {
+				util.Log.Info("DELETE pod so it can be recreated by controller", "pv", pv.Name, "pod", toBounce[i])
 				if err := m.bouncePod(ctx, &toBounce[i]); err != nil {
 					util.Log.Error("bouncing pod failed", "pod", toBounce[i].Namespace+"/"+toBounce[i].Name, "err", err)
 				}
@@ -258,7 +259,8 @@ func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []mountedDevi
 }
 
 // syncTopologyKeys keeps this node's CSINode driver entry's topologyKeys in
-// sync with whichever devices are currently mounted.
+// sync with whichever devices are currently mounted. It recreates the CSINode
+// object because the TopologyKeys part is immutable.
 func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []mountedDevice) error {
 	csiNode, err := m.clientset.StorageV1().CSINodes().Get(ctx, m.nodeName, metav1.GetOptions{})
 	if err != nil {
@@ -278,11 +280,6 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []mountedDevice)
 		return nil
 	}
 
-	// TopologyKeys rejects Update with "field is immutable" — confirmed live
-	// (the API server enforces this, it's not just an unset default). The
-	// only way to change it is delete + recreate the whole CSINode object,
-	// same pattern recreatePVForNode already uses for PV's own immutable
-	// nodeAffinity field.
 	newCSINode := csiNode.DeepCopy()
 	newCSINode.Spec.Drivers[idx].TopologyKeys = desired
 	newCSINode.ResourceVersion = ""
@@ -307,6 +304,9 @@ func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
 	var mounted []mountedDevice
 	for _, d := range discovered {
 		seen[d.DevPath] = true
+		if mp, ok := devicescan.MountedAt(hostRoot, d.DevPath); ok {
+			return mp
+		}
 		if m.mountFailures[d.DevPath] >= maxMountFailures {
 			continue
 		}
@@ -334,51 +334,51 @@ func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
 // and patches this node's labels to reflect exactly the set of device
 // classes found.
 func (m *Manager) ReconcileOnce(ctx context.Context) error {
+
+	// Find eligible devices and make sure they are mounted.
 	discovered := devicescan.Discover(m.hostRoot)
 	mounted := m.mountAll(discovered)
-
+	// Log changes:
 	current := map[string]mountedDevice{} // Serial -> mountedDevice
 	for _, d := range mounted {
 		current[d.Serial] = d
-		// TODO: make sure log level is above DEBUG
-		util.Log.Debug("mounted device", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
 	}
 	added, removed := deviceDelta(m.lastSeen, current)
 	for _, d := range added {
-		util.Log.Info("device added", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+		util.Log.Info("device ADDED", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
 	}
 	for _, d := range removed {
-		util.Log.Info("device removed", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
+		util.Log.Info("device REMOVED", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
 		cleanupMountpoint(m.hostRoot, d.mountpoint)
 	}
 	m.lastSeen = current
 
+	// Migrate volumes.
 	if err := m.migrateStaleVolumes(ctx, mounted); err != nil {
 		util.Log.Error("volume migration failed", "err", err)
 	}
 
+	// Update topology keys on CSINode objects
 	if err := m.syncTopologyKeys(ctx, mounted); err != nil {
 		util.Log.Error("syncing CSINode topology keys failed", "err", err)
 	}
 
+	// Update labels on the Node object
 	node, err := m.clientset.CoreV1().Nodes().Get(ctx, m.nodeName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-
 	desired := desiredLabels(m.driverName, mounted)
 	patch := nodeLabelPatch(node.Labels, desired, m.driverName+"/")
 	if len(patch) == 0 {
 		return nil
 	}
-
 	body, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{"labels": patch},
 	})
 	if err != nil {
 		return err
 	}
-
 	util.Log.Info("patching node labels", "patch", patch)
 	_, err = m.clientset.CoreV1().Nodes().Patch(ctx, m.nodeName, types.MergePatchType, body, metav1.PatchOptions{})
 	return err

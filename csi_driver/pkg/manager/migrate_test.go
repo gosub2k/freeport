@@ -108,6 +108,7 @@ func TestPodsToBounce(t *testing.T) {
 		terminating,
 		podWithClaim("default", "elsewhere", "node-a", "claim-1", true),
 		podWithClaim("default", "different-claim", "node-a", "claim-2", true),
+		podWithClaim("default", "not-owned", "node-a", "claim-2", false),
 	}
 
 	got := podsToBounce(pods, "claim-1", "node-b")

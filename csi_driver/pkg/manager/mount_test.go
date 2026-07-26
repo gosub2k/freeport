@@ -105,7 +105,7 @@ func TestMountDevice_skipsSwapWithoutAttemptingMount(t *testing.T) {
 	if got := mountDevice(tmp, dev); got != "" {
 		t.Errorf("mountDevice = %q, want empty for a swap partition", got)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, devicescan.CanonicalMountpoint("SNSWAP"))); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(tmp, devicescan.Mountpoint("SNSWAP"))); !os.IsNotExist(err) {
 		t.Error("mountDevice should not have created a mountpoint directory for a swap partition")
 	}
 }

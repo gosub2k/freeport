@@ -74,6 +74,10 @@ func podsToBounce(pods []corev1.Pod, claimName, thisNode string) []corev1.Pod {
 		if !podMountsClaim(&pod, claimName) {
 			continue
 		}
+		/// Bare pod that wouldn't get recreated by a controller.
+		if len(pod.OwnerReferences) == 0 {
+			continue
+		}
 		out = append(out, pod)
 	}
 	return out

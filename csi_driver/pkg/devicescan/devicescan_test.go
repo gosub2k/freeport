@@ -38,7 +38,7 @@ func TestSanitize(t *testing.T) {
 	}
 }
 
-func TestDeviceClassKey(t *testing.T) {
+func TestDeviceLabel(t *testing.T) {
 	tests := []struct {
 		name         string
 		manufacturer string
@@ -54,7 +54,7 @@ func TestDeviceClassKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DeviceClassKey(tt.manufacturer, tt.model)
+			got := DeviceLabel(tt.manufacturer, tt.model)
 			if got != tt.want {
 				t.Errorf("DeviceClassKey(%q, %q) = %q, want %q", tt.manufacturer, tt.model, got, tt.want)
 			}
@@ -68,7 +68,7 @@ func TestDeviceClassKey(t *testing.T) {
 		// 31 + 1 (sep) + 31 = 63 — must survive unchanged.
 		m := strings.Repeat("a", 31)
 		d := strings.Repeat("b", 31)
-		got := DeviceClassKey(m, d)
+		got := DeviceLabel(m, d)
 		want := m + "-" + d
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -78,7 +78,7 @@ func TestDeviceClassKey(t *testing.T) {
 	t.Run("over-budget names are split evenly", func(t *testing.T) {
 		m := strings.Repeat("a", 50)
 		d := strings.Repeat("b", 50)
-		got := DeviceClassKey(m, d)
+		got := DeviceLabel(m, d)
 		if len(got) > MaxK8sLabelLength {
 			t.Errorf("result length %d exceeds %d: %q", len(got), MaxK8sLabelLength, got)
 		}
@@ -94,7 +94,7 @@ func TestDeviceClassKey(t *testing.T) {
 	t.Run("short manufacturer leaves model most of the budget", func(t *testing.T) {
 		m := "a"
 		d := strings.Repeat("b", 70)
-		got := DeviceClassKey(m, d)
+		got := DeviceLabel(m, d)
 		want := m + "-" + strings.Repeat("b", MaxK8sLabelLength-len(m)-1)
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)

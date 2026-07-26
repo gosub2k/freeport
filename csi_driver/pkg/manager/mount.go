@@ -40,15 +40,12 @@ func isSwapType(blkidOutput string) bool {
 // mountDevice ensures dev is mounted at its canonical host mountpoint.
 // Returns the host-absolute mountpoint, or "" on failure.
 func mountDevice(hostRoot string, dev devicescan.Device) string {
-	if mp, ok := devicescan.MountedAt(hostRoot, dev.DevPath); ok {
-		return mp
-	}
 	if isSwapPartition(dev.DevPath) {
 		util.Log.Debug("skipping swap partition", "dev", dev.DevPath)
 		return ""
 	}
 
-	mountpoint := devicescan.CanonicalMountpoint(dev.Serial)
+	mountpoint := devicescan.Mountpoint(dev.Serial)
 	hostMountpoint := filepath.Join(hostRoot, mountpoint)
 	if err := os.MkdirAll(hostMountpoint, 0750); err != nil {
 		util.Log.Error("mkdir failed", "path", hostMountpoint, "err", err)
@@ -60,7 +57,7 @@ func mountDevice(hostRoot string, dev devicescan.Device) string {
 		util.Log.Error("mount failed", "dev", dev.DevPath, "mp", hostMountpoint, "err", err, "output", strings.TrimSpace(string(out)))
 		return ""
 	}
-	util.Log.Info("mounted", "dev", dev.DevPath, "mp", mountpoint)
+	util.Log.Info("MOUNTED", "dev", dev.DevPath, "mp", mountpoint)
 	return mountpoint
 }
 

@@ -8,6 +8,8 @@ import (
 	"freeport/pkg/devicescan"
 )
 
+// REVISIT: why is this here and not in devicescan package
+//
 // hostBlockDevice is a USB device the node driver considers ready to use —
 // one pkg/manager has already discovered and mounted. The driver never
 // mounts or formats anything itself.
@@ -56,7 +58,7 @@ func matchVolumeContext(devices []hostBlockDevice, driverName string, vc map[str
 	prefix := driverName + "/"
 	var matched []hostBlockDevice
 	for _, dev := range devices {
-		classKey := devicescan.DeviceClassKey(dev.manufacturer, dev.model)
+		classKey := devicescan.DeviceLabel(dev.manufacturer, dev.model)
 		ok := true
 		for k, v := range vc {
 			if !strings.HasPrefix(k, prefix) {
