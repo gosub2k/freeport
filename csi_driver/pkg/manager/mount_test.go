@@ -4,27 +4,93 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"freeport/pkg/devicescan"
 )
 
-func TestMountDevice_alreadyMountedIsIdempotent(t *testing.T) {
-	tmp := t.TempDir()
-	procDir := filepath.Join(tmp, "proc/1")
-	if err := os.MkdirAll(procDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	mounts := "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
-	if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte(mounts), 0644); err != nil {
-		t.Fatal(err)
+func TestIsMounted(t *testing.T) {
+	// writeMounts builds a hostRoot whose /proc/1/mounts holds the given lines.
+	writeMounts := func(t *testing.T, lines string) string {
+		t.Helper()
+		tmp := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmp, "proc/1"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "proc/1/mounts"), []byte(lines), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return tmp
 	}
 
-	dev := devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"}
-	got := mountDevice(tmp, dev)
-	if got != "/mnt/k8s-freeport-SN123" {
-		t.Errorf("mountDevice = %q, want %q (no real mount(8) should have been attempted)", got, "/mnt/k8s-freeport-SN123")
+	tests := []struct {
+		name   string
+		mounts string
+		dev    devicescan.Device
+		want   bool
+	}{
+		{
+			name:   "source matches, both sides bare",
+			mounts: "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
+			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
+			want:   true,
+		},
+		{
+			// The mount-table-explosion bug: Discover() hands us a
+			// hostRoot-prefixed DevPath, PID 1 records the bare one.
+			name:   "source matches a hostRoot-prefixed DevPath against a bare mount entry",
+			mounts: "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
+			dev:    devicescan.Device{Serial: "SN123", DevPath: "HOSTROOT/dev/sdb1"},
+			want:   true,
+		},
+		{
+			// Something is already occupying the canonical mountpoint, so
+			// mounting again would stack a duplicate on top of it.
+			name:   "destination matches even when the source device differs",
+			mounts: "/dev/sdz9 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
+			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
+			want:   true,
+		},
+		{
+			name:   "neither source nor destination matches",
+			mounts: "/dev/sda1 / ext4 rw 0 0\n/dev/sdz9 /mnt/k8s-freeport-OTHER vfat rw 0 0\n",
+			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
+			want:   false,
+		},
+		{
+			name:   "empty mount table",
+			mounts: "",
+			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
+			want:   false,
+		},
+		{
+			name:   "short lines are skipped, not treated as a match",
+			mounts: "garbage\n\n/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
+			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
+			want:   true,
+		},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := writeMounts(t, tt.mounts)
+			dev := tt.dev
+			dev.DevPath = strings.Replace(dev.DevPath, "HOSTROOT", tmp, 1)
+
+			m := &Manager{hostRoot: tmp}
+			if got := m.isMounted(dev); got != tt.want {
+				t.Errorf("isMounted(%q) = %v, want %v", dev.DevPath, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("missing mounts file reports not mounted", func(t *testing.T) {
+		m := &Manager{hostRoot: t.TempDir()}
+		if m.isMounted(devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"}) {
+			t.Error("isMounted = true, want false when /proc/1/mounts is unreadable")
+		}
+	})
 }
 
 func TestMountDevice_notMountedAttemptsRealMount(t *testing.T) {
@@ -40,7 +106,7 @@ func TestMountDevice_notMountedAttemptsRealMount(t *testing.T) {
 	}
 
 	dev := devicescan.Device{Serial: "SN999", DevPath: "/dev/does-not-exist"}
-	got := mountDevice(tmp, dev)
+	got := (&Manager{hostRoot: tmp}).mountDevice(dev)
 	if got != "" {
 		t.Errorf("mountDevice = %q, want empty (mount of nonexistent device must fail)", got)
 	}
@@ -102,7 +168,7 @@ func TestMountDevice_skipsSwapWithoutAttemptingMount(t *testing.T) {
 	}
 
 	dev := devicescan.Device{Serial: "SNSWAP", DevPath: swapPath}
-	if got := mountDevice(tmp, dev); got != "" {
+	if got := (&Manager{hostRoot: tmp}).mountDevice(dev); got != "" {
 		t.Errorf("mountDevice = %q, want empty for a swap partition", got)
 	}
 	if _, err := os.Stat(filepath.Join(tmp, devicescan.Mountpoint("SNSWAP"))); !os.IsNotExist(err) {
@@ -110,11 +176,11 @@ func TestMountDevice_skipsSwapWithoutAttemptingMount(t *testing.T) {
 	}
 }
 
-func TestMountAll_givesUpAfterMaxFailures(t *testing.T) {
+func TestEnsureMounted_givesUpAfterMaxFailures(t *testing.T) {
 	calls := 0
 	m := &Manager{
 		mountFailures: map[string]int{},
-		mountFn: func(hostRoot string, dev devicescan.Device) string {
+		mountFn: func(dev devicescan.Device) string {
 			calls++
 			return ""
 		},
@@ -122,9 +188,9 @@ func TestMountAll_givesUpAfterMaxFailures(t *testing.T) {
 	dev := devicescan.Device{Serial: "SN1", DevPath: "/dev/sdx1"}
 
 	for i := 0; i < 5; i++ {
-		got := m.mountAll([]devicescan.Device{dev})
+		got := m.ensureMounted([]devicescan.Device{dev})
 		if len(got) != 0 {
-			t.Fatalf("pass %d: mountAll = %v, want empty", i, got)
+			t.Fatalf("pass %d: ensureMounted = %v, want empty", i, got)
 		}
 	}
 
@@ -136,11 +202,11 @@ func TestMountAll_givesUpAfterMaxFailures(t *testing.T) {
 	}
 }
 
-func TestMountAll_successResetsFailureCount(t *testing.T) {
+func TestEnsureMounted_successResetsFailureCount(t *testing.T) {
 	attempt := 0
 	m := &Manager{
 		mountFailures: map[string]int{},
-		mountFn: func(hostRoot string, dev devicescan.Device) string {
+		mountFn: func(dev devicescan.Device) string {
 			attempt++
 			if attempt <= 2 {
 				return ""
@@ -150,42 +216,42 @@ func TestMountAll_successResetsFailureCount(t *testing.T) {
 	}
 	dev := devicescan.Device{Serial: "SN1", DevPath: "/dev/sdx1"}
 
-	m.mountAll([]devicescan.Device{dev})
-	m.mountAll([]devicescan.Device{dev})
+	m.ensureMounted([]devicescan.Device{dev})
+	m.ensureMounted([]devicescan.Device{dev})
 	if m.mountFailures["/dev/sdx1"] != 2 {
 		t.Fatalf("mountFailures[/dev/sdx1] = %d, want 2 before the successful attempt", m.mountFailures["/dev/sdx1"])
 	}
 
-	got := m.mountAll([]devicescan.Device{dev})
+	got := m.ensureMounted([]devicescan.Device{dev})
 	if len(got) != 1 || got[0].mountpoint != "/mnt/k8s-freeport-SN1" {
-		t.Fatalf("mountAll = %v, want the device mounted on the 3rd attempt", got)
+		t.Fatalf("ensureMounted = %v, want the device mounted on the 3rd attempt", got)
 	}
 	if _, stillTracked := m.mountFailures["/dev/sdx1"]; stillTracked {
 		t.Errorf("mountFailures[/dev/sdx1] should have been cleared on success, still present: %v", m.mountFailures)
 	}
 }
 
-func TestMountAll_deviceGoneResetsFailureCount(t *testing.T) {
+func TestEnsureMounted_deviceGoneResetsFailureCount(t *testing.T) {
 	m := &Manager{
 		mountFailures: map[string]int{},
-		mountFn: func(hostRoot string, dev devicescan.Device) string {
+		mountFn: func(dev devicescan.Device) string {
 			return ""
 		},
 	}
 	dev := devicescan.Device{Serial: "SN1", DevPath: "/dev/sdx1"}
 
-	m.mountAll([]devicescan.Device{dev})
-	m.mountAll([]devicescan.Device{dev})
+	m.ensureMounted([]devicescan.Device{dev})
+	m.ensureMounted([]devicescan.Device{dev})
 	if m.mountFailures["/dev/sdx1"] != 2 {
 		t.Fatalf("mountFailures[/dev/sdx1] = %d, want 2", m.mountFailures["/dev/sdx1"])
 	}
 
-	m.mountAll(nil) // device unplugged — not in this pass's discovered list
+	m.ensureMounted(nil) // device unplugged — not in this pass's discovered list
 	if _, tracked := m.mountFailures["/dev/sdx1"]; tracked {
 		t.Fatalf("mountFailures[/dev/sdx1] should be cleared once the device is no longer discovered, still present: %v", m.mountFailures)
 	}
 
-	m.mountAll([]devicescan.Device{dev}) // reinserted — should get a fresh attempt budget
+	m.ensureMounted([]devicescan.Device{dev}) // reinserted — should get a fresh attempt budget
 	if m.mountFailures["/dev/sdx1"] != 1 {
 		t.Errorf("mountFailures[/dev/sdx1] = %d after reinsertion, want 1 (fresh budget, not resumed at 2)", m.mountFailures["/dev/sdx1"])
 	}
@@ -199,13 +265,13 @@ func TestMountAll_deviceGoneResetsFailureCount(t *testing.T) {
 // success cleared the shared counter every tick before sdf3 could ever
 // accumulate 3 consecutive failures — the cap silently never engaged, and
 // "mount failed" logged forever. Keying by DevPath instead fixes this.
-func TestMountAll_siblingPartitionSuccessDoesNotResetFailureCount(t *testing.T) {
+func TestEnsureMounted_siblingPartitionSuccessDoesNotResetFailureCount(t *testing.T) {
 	goodPartition := devicescan.Device{Serial: "SHARED", DevPath: "/dev/sdf1", Partition: 1}
 	badPartition := devicescan.Device{Serial: "SHARED", DevPath: "/dev/sdf3", Partition: 3}
 
 	m := &Manager{
 		mountFailures: map[string]int{},
-		mountFn: func(hostRoot string, dev devicescan.Device) string {
+		mountFn: func(dev devicescan.Device) string {
 			if dev.DevPath == goodPartition.DevPath {
 				return "/mnt/k8s-freeport-SHARED"
 			}
@@ -214,7 +280,7 @@ func TestMountAll_siblingPartitionSuccessDoesNotResetFailureCount(t *testing.T) 
 	}
 
 	for i := 0; i < 5; i++ {
-		m.mountAll([]devicescan.Device{goodPartition, badPartition})
+		m.ensureMounted([]devicescan.Device{goodPartition, badPartition})
 	}
 
 	if m.mountFailures["/dev/sdf3"] != maxMountFailures {
@@ -234,7 +300,7 @@ func TestCleanupMountpoint_removesEmptyDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleanupMountpoint(tmp, mountpoint)
+	(&Manager{hostRoot: tmp}).cleanupMountpoint(mountpoint)
 
 	if _, err := os.Stat(hostMountpoint); !os.IsNotExist(err) {
 		t.Errorf("cleanupMountpoint should have removed the empty directory, stat err = %v", err)
@@ -253,7 +319,7 @@ func TestCleanupMountpoint_refusesNonEmptyDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleanupMountpoint(tmp, mountpoint)
+	(&Manager{hostRoot: tmp}).cleanupMountpoint(mountpoint)
 
 	if _, err := os.Stat(leftoverFile); err != nil {
 		t.Errorf("cleanupMountpoint must not touch a non-empty mountpoint's contents, but stat failed: %v", err)

@@ -14,10 +14,16 @@
 package manager
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"freeport/pkg/devicescan"
@@ -93,24 +99,26 @@ type Manager struct {
 	lastSeen map[string]mountedDevice
 
 	// mountFailures counts consecutive mount(8) failures per device serial,
-	// per manager instance, so mountAll can stop avoid failing identically forever.
+	// per manager instance, so ensureMounted can stop avoid failing identically forever.
 	mountFailures map[string]int
 
 	// mountFn is mountDevice by default; swappable in tests.
-	mountFn func(hostRoot string, dev devicescan.Device) string
+	mountFn func(dev devicescan.Device) string
 }
 
 // New returns a new Manager.
 func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) *Manager {
-	return &Manager{
+	m := &Manager{
 		clientset:     clientset,
 		nodeName:      nodeName,
 		hostRoot:      hostRoot,
 		driverName:    driverName,
 		lastSeen:      map[string]mountedDevice{},
 		mountFailures: map[string]int{},
-		mountFn:       mountDevice,
 	}
+	// Bound after construction: mountDevice is a method, so it needs m to exist.
+	m.mountFn = m.mountDevice
+	return m
 }
 
 // listPVsByVolumeHandle return map of CSI VolumeHandle -> PersistentVolume object
@@ -298,19 +306,101 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []mountedDevice)
 	return err
 }
 
-// mountAll attempts to mount every discovered device, keyed by DevPath.
-func (m *Manager) mountAll(discovered []devicescan.Device) []mountedDevice {
+// isMounted reports whether dev is already mounted at its canonical
+// mountpoint, so ensureMounted can skip it.
+//
+// It matches on either half of the mount entry — source device or destination
+// mountpoint — because a match on either one means mounting again would only
+// stack a duplicate on top. Both halves get the hostRoot prefix trimmed first:
+// Discover() yields hostRoot-prefixed paths ("/host/dev/sda1"), while
+// /proc/1/mounts belongs to the real host's init and records bare ones
+// ("/dev/sda1"), so the two forms never compare equal untrimmed.
+func (m *Manager) isMounted(dev devicescan.Device) bool {
+	f, err := os.Open(filepath.Join(m.hostRoot, "/proc/1/mounts"))
+	if err != nil {
+		util.Log.Error("cannot read mount table, assuming not mounted", "err", err)
+		return false
+	}
+	defer f.Close()
+
+	// Applied to both sides, so it doesn't matter which form either started in.
+	bare := func(p string) string { return strings.TrimPrefix(p, m.hostRoot) }
+	wantSource, wantDest := bare(dev.DevPath), bare(devicescan.Mountpoint(dev.Serial))
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		parts := strings.Fields(sc.Text())
+		if len(parts) < 2 {
+			continue
+		}
+		if bare(parts[0]) == wantSource || bare(parts[1]) == wantDest {
+			util.Log.Debug("already mounted", "dev", dev.DevPath, "source", parts[0], "dest", parts[1])
+			return true
+		}
+	}
+	return false
+}
+
+// mountDevice ensures dev is mounted at its canonical host mountpoint.
+// Returns the host-absolute mountpoint, or "" on failure.
+func (m *Manager) mountDevice(dev devicescan.Device) string {
+	if isSwapPartition(dev.DevPath) {
+		util.Log.Debug("skipping swap partition", "dev", dev.DevPath)
+		return ""
+	}
+
+	mountpoint := devicescan.Mountpoint(dev.Serial)
+	hostMountpoint := filepath.Join(m.hostRoot, mountpoint)
+	if err := os.MkdirAll(hostMountpoint, 0750); err != nil {
+		util.Log.Error("mkdir failed", "path", hostMountpoint, "err", err)
+		return ""
+	}
+
+	// REVISIT: consider mounting with -o sync to reduce chance of dirty filesystem if media removed.
+	if out, err := exec.Command("mount" /* "-o", "sync", */, dev.DevPath, hostMountpoint).CombinedOutput(); err != nil {
+		util.Log.Error("mount failed", "dev", dev.DevPath, "mp", hostMountpoint, "err", err, "output", strings.TrimSpace(string(out)))
+		return ""
+	}
+	util.Log.Info("MOUNTED", "dev", dev.DevPath, "mp", mountpoint)
+	return mountpoint
+}
+
+// cleanupMountpoint unmounts and removes the canonical mountpoint directory
+// left behind by a device that has just been unplugged.
+func (m *Manager) cleanupMountpoint(mountpoint string) {
+	hostMountpoint := filepath.Join(m.hostRoot, mountpoint)
+
+	if err := syscall.Unmount(hostMountpoint, 0); err != nil && err != syscall.EINVAL && err != syscall.ENOENT {
+		util.Log.Error("unmount failed for removed device", "path", hostMountpoint, "err", err)
+	}
+
+	switch err := os.Remove(hostMountpoint); {
+	case err == nil:
+		util.Log.Info("removed mountpoint for unplugged device", "path", hostMountpoint)
+	case os.IsNotExist(err):
+		// already gone — nothing to do.
+	case errors.Is(err, syscall.ENOTEMPTY):
+		util.Log.Error("mountpoint not empty after device removal, something went wrong — leaving it for manual inspection", "path", hostMountpoint)
+	default:
+		util.Log.Error("cannot remove mountpoint for removed device", "path", hostMountpoint, "err", err)
+	}
+}
+
+// ensureMounted attempts to mount every discovered device, keyed by DevPath.
+func (m *Manager) ensureMounted(discovered []devicescan.Device) []mountedDevice {
 	seen := map[string]bool{}
 	var mounted []mountedDevice
 	for _, d := range discovered {
 		seen[d.DevPath] = true
-		if mp, ok := devicescan.MountedAt(hostRoot, d.DevPath); ok {
-			return mp
+		if m.isMounted(d) {
+			mp := devicescan.Mountpoint(d.Serial)
+			mounted = append(mounted, mountedDevice{Device: d, mountpoint: mp, free: getDf(mp)})
+			continue
 		}
 		if m.mountFailures[d.DevPath] >= maxMountFailures {
 			continue
 		}
-		mp := m.mountFn(m.hostRoot, d)
+		mp := m.mountFn(d)
 		if mp == "" {
 			m.mountFailures[d.DevPath]++
 			if m.mountFailures[d.DevPath] == maxMountFailures {
@@ -337,7 +427,7 @@ func (m *Manager) ReconcileOnce(ctx context.Context) error {
 
 	// Find eligible devices and make sure they are mounted.
 	discovered := devicescan.Discover(m.hostRoot)
-	mounted := m.mountAll(discovered)
+	mounted := m.ensureMounted(discovered)
 	// Log changes:
 	current := map[string]mountedDevice{} // Serial -> mountedDevice
 	for _, d := range mounted {
@@ -349,7 +439,7 @@ func (m *Manager) ReconcileOnce(ctx context.Context) error {
 	}
 	for _, d := range removed {
 		util.Log.Info("device REMOVED", "manufacturer", d.Manufacturer, "model", d.Model, "mountpoint", d.mountpoint)
-		cleanupMountpoint(m.hostRoot, d.mountpoint)
+		m.cleanupMountpoint(d.mountpoint)
 	}
 	m.lastSeen = current
 
