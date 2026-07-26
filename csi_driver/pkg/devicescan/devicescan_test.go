@@ -30,7 +30,7 @@ func TestSanitize(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Sanitize(tt.in)
+			got := K8sLabel(tt.in)
 			if got != tt.out {
 				t.Errorf("Sanitize(%q) = %q, want %q", tt.in, got, tt.out)
 			}
@@ -58,8 +58,8 @@ func TestDeviceClassKey(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("DeviceClassKey(%q, %q) = %q, want %q", tt.manufacturer, tt.model, got, tt.want)
 			}
-			if len(got) > DeviceClassNameLimit {
-				t.Errorf("result length %d exceeds %d", len(got), DeviceClassNameLimit)
+			if len(got) > MaxK8sLabelLength {
+				t.Errorf("result length %d exceeds %d", len(got), MaxK8sLabelLength)
 			}
 		})
 	}
@@ -79,8 +79,8 @@ func TestDeviceClassKey(t *testing.T) {
 		m := strings.Repeat("a", 50)
 		d := strings.Repeat("b", 50)
 		got := DeviceClassKey(m, d)
-		if len(got) > DeviceClassNameLimit {
-			t.Errorf("result length %d exceeds %d: %q", len(got), DeviceClassNameLimit, got)
+		if len(got) > MaxK8sLabelLength {
+			t.Errorf("result length %d exceeds %d: %q", len(got), MaxK8sLabelLength, got)
 		}
 		parts := strings.SplitN(got, "-", 2)
 		if len(parts) != 2 {
@@ -95,7 +95,7 @@ func TestDeviceClassKey(t *testing.T) {
 		m := "a"
 		d := strings.Repeat("b", 70)
 		got := DeviceClassKey(m, d)
-		want := m + "-" + strings.Repeat("b", DeviceClassNameLimit-len(m)-1)
+		want := m + "-" + strings.Repeat("b", MaxK8sLabelLength-len(m)-1)
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}

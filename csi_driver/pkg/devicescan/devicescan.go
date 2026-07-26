@@ -1,12 +1,9 @@
 // Package devicescan provides read-only discovery of USB block devices, and
 // the naming rules derived from them. It has no side effects — no mounting,
-// no formatting — so it can be safely shared between pkg/manager (which owns
-// mounting/formatting) and pkg/driver (which only needs to recognize devices
-// the manager has already prepared).
+// no formatting, no reading of mount state — just finding devices via sysfs.
 package devicescan
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,12 +14,9 @@ import (
 	"freeport/pkg/util"
 )
 
-// usb-...-partN identifies a USB partition symlink; partition number in group 1.
-var usbPartRegexp = regexp.MustCompile(`^usb-.+-part(\d+)$`)
-
-// DeviceClassNameLimit is the Kubernetes label-name length limit (63 chars),
+// MaxK8sLabelLength is the Kubernetes label-name length limit (63 chars),
 // which topology keys and volume-context attribute names must also satisfy.
-const DeviceClassNameLimit = 63
+const MaxK8sLabelLength = 63
 
 // Device is a USB block device partition discovered via sysfs, before any
 // mount/format decision has been made about it.
@@ -42,9 +36,9 @@ func (d Device) String() string {
 	return fmt.Sprintf("serial: %s, manufacturer: %q, type: usb, model: %q, partition: %s", d.Serial, d.Manufacturer, d.Model, partition)
 }
 
-// Sanitize lowercases s and replaces any character that is not alphanumeric,
-// '-', '_', or '.' with '-', then strips leading/trailing separators.
-func Sanitize(s string) string {
+// K8sLabel converts a string to a valid K8s label.
+// See https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+func K8sLabel(s string) string {
 	s = strings.ToLower(s)
 	var b strings.Builder
 	for _, r := range s {
@@ -57,23 +51,20 @@ func Sanitize(s string) string {
 	return strings.Trim(b.String(), "-_.")
 }
 
-// DeviceClassKey builds the canonical "<manufacturer>-<model>" topology name
-// for a device, e.g. "sandisk-cruzer". A missing manufacturer or model is
-// replaced with "unknown" rather than collapsing into a bare separator. If
-// the combined length would exceed DeviceClassNameLimit, both halves are
-// truncated to an even split so neither one starves the other.
-func DeviceClassKey(manufacturer, model string) string {
-	m := Sanitize(manufacturer)
+// DeviceLabel builds the canonical "<manufacturer>-<model>" topology name
+// for a device, e.g. "sandisk-cruzer".
+func DeviceLabel(manufacturer, model string) string {
+	m := K8sLabel(manufacturer)
 	if m == "" {
 		m = "unknown"
 	}
-	d := Sanitize(model)
+	d := K8sLabel(model)
 	if d == "" {
 		d = "unknown"
 	}
 
 	const sep = "-"
-	budget := DeviceClassNameLimit - len(sep)
+	budget := MaxK8sLabelLength - len(sep)
 	if len(m)+len(d) > budget {
 		half := budget / 2
 		m = m[:min(len(m), half)]
@@ -84,11 +75,9 @@ func DeviceClassKey(manufacturer, model string) string {
 	return m + sep + d
 }
 
-// CanonicalMountpoint returns the host-absolute mountpoint a device with the
-// given serial should be mounted at. This is the one place this format
-// lives: pkg/manager mounts devices there, pkg/driver checks they're already
-// mounted there.
-func CanonicalMountpoint(serial string) string {
+// Mountpoint returns the host-absolute mountpoint a device with the
+// given serial should be mounted at.
+func Mountpoint(serial string) string {
 	return fmt.Sprintf("/mnt/k8s-freeport-%s", serial)
 }
 
@@ -123,69 +112,43 @@ func usbNodeFor(device, sysClassBlock string) string {
 }
 
 // Discover walks hostRoot's /dev/disk/by-id for usb-...-partN symlinks and
-// resolves manufacturer/product/serial via sysfs. It performs no mount(8)
-// calls — every partition found is returned, mounted or not.
+// resolves manufacturer/product/serial via sysfs.
 func Discover(hostRoot string) []Device {
-	devDir := filepath.Join(hostRoot, "/dev/disk/by-id")
-	sysClassBlock := filepath.Join(hostRoot, "/sys/class/block")
+	diskById := filepath.Join(hostRoot, "/dev/disk/by-id")
 
-	entries, err := os.ReadDir(devDir) // already sorted by name
+	entries, err := os.ReadDir(diskById) // already sorted by name
 	if err != nil {
-		// Treated the same as "no devices" rather than surfaced as an error:
-		// a transient failure to read this dir is unlikely and self-heals on
-		// the next reconcile loop, so it's not worth a separate error path.
-		util.Log.Info("cannot read device dir", "path", devDir, "err", err)
+		// Assume transient failure.
+		util.Log.Info("cannot read device dir", "path", diskById, "err", err)
 		return nil
 	}
 
 	var devs []Device
+	usbPartRegexp := regexp.MustCompile(`^usb-.+-part(\d+)$`)
 	for _, e := range entries {
-		m := usbPartRegexp.FindStringSubmatch(e.Name())
-		if m == nil {
-			continue
-		}
-		partition, _ := strconv.Atoi(m[1])
+		if m := usbPartRegexp.FindStringSubmatch(e.Name()); m != nil {
+			partition, _ := strconv.Atoi(m[1])
 
-		device, err := filepath.EvalSymlinks(filepath.Join(devDir, e.Name()))
-		if err != nil {
-			continue
-		}
+			device, err := filepath.EvalSymlinks(filepath.Join(diskById, e.Name()))
+			if err != nil {
+				util.Log.Debug("filepath.EvalSymlinks", "err", err)
+				continue
+			}
 
-		usbNode := usbNodeFor(device, sysClassBlock)
-		if usbNode == "" {
-			util.Log.Info("no USB sysfs node", "device", device)
-			continue
-		}
+			usbNode := usbNodeFor(device, filepath.Join(hostRoot, "/sys/class/block"))
+			if usbNode == "" {
+				util.Log.Info("no USB sysfs node", "device", device)
+				continue
+			}
 
-		devs = append(devs, Device{
-			Manufacturer: readSysAttr(filepath.Join(usbNode, "manufacturer")),
-			Model:        readSysAttr(filepath.Join(usbNode, "product")),
-			Serial:       readSysAttr(filepath.Join(usbNode, "serial")),
-			Partition:    partition,
-			DevPath:      device,
-		})
+			devs = append(devs, Device{
+				Manufacturer: readSysAttr(filepath.Join(usbNode, "manufacturer")),
+				Model:        readSysAttr(filepath.Join(usbNode, "product")),
+				Serial:       readSysAttr(filepath.Join(usbNode, "serial")),
+				Partition:    partition,
+				DevPath:      device,
+			})
+		}
 	}
 	return devs
-}
-
-// MountedAt parses hostRoot's /proc/1/mounts and reports the mountpoint
-// recorded for devPath, if any.
-func MountedAt(hostRoot, devPath string) (mountpoint string, ok bool) {
-	procMounts := filepath.Join(hostRoot, "/proc/1/mounts")
-	f, err := os.Open(procMounts)
-	if err != nil {
-		return "", false
-	}
-	defer f.Close()
-
-	bareDevPath := strings.TrimPrefix(devPath, hostRoot)
-
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		parts := strings.Fields(sc.Text())
-		if len(parts) >= 2 && parts[0] == bareDevPath {
-			return parts[1], true
-		}
-	}
-	return "", false
 }
