@@ -1,6 +1,11 @@
-// Package devicescan provides read-only discovery of USB block devices, and
-// the naming rules derived from them. It has no side effects — no mounting,
-// no formatting, no reading of mount state — just finding devices via sysfs.
+// Package devicescan provides read-only discovery of USB block devices, the
+// naming rules derived from them, and the shared answer to "is this device
+// mounted where we expect it?". It has no side effects — no mounting, no
+// formatting — so pkg/manager (which owns mounting) and pkg/driver (which only
+// consumes what the manager prepared) can agree on device state without one
+// depending on the other. That agreement matters: if the two disagree about
+// whether a device is ready, the manager labels the node while the driver
+// refuses to publish, and pods schedule somewhere they cannot mount.
 package devicescan
 
 import (
@@ -15,18 +20,15 @@ import (
 	"freeport/pkg/util"
 )
 
-// MaxK8sLabelLength is the Kubernetes label-name length limit (63 chars),
-// which topology keys and volume-context attribute names must also satisfy.
-const MaxK8sLabelLength = 63
+const Maxk8sLabelLength = 63
 
-// Device is a USB block device partition discovered via sysfs, before any
-// mount/format decision has been made about it.
+// Device is a USB block device partition discovered via sysfs.
 type Device struct {
 	Manufacturer string
 	Model        string
 	Serial       string
 	Partition    int
-	DevPath      string // resolved real device node, e.g. "/dev/sdb1"
+	DevPath      string // real device node, e.g. "/dev/sdb1"
 }
 
 func (d Device) String() string {
@@ -37,35 +39,35 @@ func (d Device) String() string {
 	return fmt.Sprintf("serial: %s, manufacturer: %q, type: usb, model: %q, partition: %s", d.Serial, d.Manufacturer, d.Model, partition)
 }
 
-// K8sLabel converts a string to a valid K8s label.
-// See https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
-func K8sLabel(s string) string {
-	s = strings.ToLower(s)
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	return strings.Trim(b.String(), "-_.")
-}
-
 // DeviceLabel builds the canonical "<manufacturer>-<model>" topology name
 // for a device, e.g. "sandisk-cruzer".
 func DeviceLabel(manufacturer, model string) string {
-	m := K8sLabel(manufacturer)
+
+	// See https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+	k8sLabel := func(s string) string {
+		s = strings.ToLower(s)
+		var b strings.Builder
+		for _, r := range s {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+				b.WriteRune(r)
+			} else {
+				b.WriteByte('-')
+			}
+		}
+		return strings.Trim(b.String(), "-_.")
+	}
+
+	m := k8sLabel(manufacturer)
 	if m == "" {
 		m = "unknown"
 	}
-	d := K8sLabel(model)
+	d := k8sLabel(model)
 	if d == "" {
 		d = "unknown"
 	}
 
 	const sep = "-"
-	budget := MaxK8sLabelLength - len(sep)
+	budget := Maxk8sLabelLength - len(sep)
 	if len(m)+len(d) > budget {
 		half := budget / 2
 		m = m[:min(len(m), half)]
@@ -82,18 +84,11 @@ func Mountpoint(serial string) string {
 	return fmt.Sprintf("/mnt/k8s-freeport-%s", serial)
 }
 
-func readSysAttr(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
-
 // usbNodeFor walks sysfs up from the block device until it finds a directory
 // containing a "serial" file — that is the USB device node carrying
 // manufacturer/product/serial attributes.
 func usbNodeFor(device, sysClassBlock string) string {
+
 	base := filepath.Base(device)
 	d, err := filepath.EvalSymlinks(filepath.Join(sysClassBlock, base))
 	if err != nil {
@@ -115,9 +110,17 @@ func usbNodeFor(device, sysClassBlock string) string {
 // Discover walks hostRoot's /dev/disk/by-id for usb-...-partN symlinks and
 // resolves manufacturer/product/serial via sysfs.
 func Discover(hostRoot string) []Device {
+	readSysAttr := func(path string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+
 	diskById := filepath.Join(hostRoot, "/dev/disk/by-id")
 
-	entries, err := os.ReadDir(diskById) // already sorted by name
+	diskEntries, err := os.ReadDir(diskById) // already sorted by name
 	if err != nil {
 		// Assume transient failure.
 		util.Log.Info("cannot read device dir", "path", diskById, "err", err)
@@ -126,7 +129,7 @@ func Discover(hostRoot string) []Device {
 
 	var devs []Device
 	usbPartRegexp := regexp.MustCompile(`^usb-.+-part(\d+)$`)
-	for _, e := range entries {
+	for _, e := range diskEntries {
 		if m := usbPartRegexp.FindStringSubmatch(e.Name()); m != nil {
 			partition, _ := strconv.Atoi(m[1])
 
@@ -154,24 +157,33 @@ func Discover(hostRoot string) []Device {
 	return devs
 }
 
-// MountedAt parses hostRoot's /proc/1/mounts and reports the mountpoint
-// recorded for devPath, if any.
-func MountedAt(hostRoot, devPath string) (mountpoint string, ok bool) {
-	procMounts := filepath.Join(hostRoot, "/proc/1/mounts")
-	f, err := os.Open(procMounts)
+// MountedAt parses hostRoot's /proc/1/mounts and reports which source device
+// is mounted at dev's canonical mountpoint, if anything is.
+func MountedAt(hostRoot string, dev Device) (source string, mounted bool) {
+	f, err := os.Open(filepath.Join(hostRoot, "/proc/1/mounts"))
 	if err != nil {
+		util.Log.Debug("cannot read mount table", "err", err)
 		return "", false
 	}
 	defer f.Close()
 
-	bareDevPath := strings.TrimPrefix(devPath, hostRoot)
+	// Applied to both sides, so it doesn't matter which form either started in.
+	bare := func(p string) string { return strings.TrimPrefix(p, hostRoot) }
+	want := bare(Mountpoint(dev.Serial))
 
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		parts := strings.Fields(sc.Text())
-		if len(parts) >= 2 && parts[0] == bareDevPath {
-			return parts[1], true
+		if len(parts) >= 2 && bare(parts[1]) == want {
+			source, mounted = bare(parts[0]), true
 		}
 	}
-	return "", false
+	return source, mounted
+}
+
+// IsMounted reports whether dev itself is currently mounted at its canonical
+// mountpoint.
+func IsMounted(hostRoot string, dev Device) bool {
+	source, mounted := MountedAt(hostRoot, dev)
+	return mounted && source == strings.TrimPrefix(dev.DevPath, hostRoot)
 }

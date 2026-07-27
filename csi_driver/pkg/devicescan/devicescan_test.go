@@ -7,37 +7,6 @@ import (
 	"testing"
 )
 
-func TestSanitize(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		out  string
-	}{
-		{"empty", "", ""},
-		{"already clean", "hello", "hello"},
-		{"uppercase to lower", "Hello", "hello"},
-		{"space becomes dash", "Hello World", "hello-world"},
-		{"underscore preserved", "USB_Drive", "usb_drive"},
-		{"dot preserved", "drive2.0", "drive2.0"},
-		{"special chars become dashes", "a@b#c$d", "a-b-c-d"},
-		{"leading separator stripped", "---leading", "leading"},
-		{"trailing separator stripped", "trailing---", "trailing"},
-		{"leading and trailing dots stripped", "...dots...", "dots"},
-		{"mixed separators stripped at edges", "___dot.sep___", "dot.sep"},
-		{"spaces at edges stripped via dash trim", "  spaces  ", "spaces"},
-		{"alphanumeric preserved", "ABC123", "abc123"},
-		{"exclamation becomes dash then trimmed", "drive!", "drive"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := K8sLabel(tt.in)
-			if got != tt.out {
-				t.Errorf("Sanitize(%q) = %q, want %q", tt.in, got, tt.out)
-			}
-		})
-	}
-}
-
 func TestDeviceLabel(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -58,8 +27,8 @@ func TestDeviceLabel(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("DeviceClassKey(%q, %q) = %q, want %q", tt.manufacturer, tt.model, got, tt.want)
 			}
-			if len(got) > MaxK8sLabelLength {
-				t.Errorf("result length %d exceeds %d", len(got), MaxK8sLabelLength)
+			if len(got) > Maxk8sLabelLength {
+				t.Errorf("result length %d exceeds %d", len(got), Maxk8sLabelLength)
 			}
 		})
 	}
@@ -79,8 +48,8 @@ func TestDeviceLabel(t *testing.T) {
 		m := strings.Repeat("a", 50)
 		d := strings.Repeat("b", 50)
 		got := DeviceLabel(m, d)
-		if len(got) > MaxK8sLabelLength {
-			t.Errorf("result length %d exceeds %d: %q", len(got), MaxK8sLabelLength, got)
+		if len(got) > Maxk8sLabelLength {
+			t.Errorf("result length %d exceeds %d: %q", len(got), Maxk8sLabelLength, got)
 		}
 		parts := strings.SplitN(got, "-", 2)
 		if len(parts) != 2 {
@@ -95,7 +64,7 @@ func TestDeviceLabel(t *testing.T) {
 		m := "a"
 		d := strings.Repeat("b", 70)
 		got := DeviceLabel(m, d)
-		want := m + "-" + strings.Repeat("b", MaxK8sLabelLength-len(m)-1)
+		want := m + "-" + strings.Repeat("b", Maxk8sLabelLength-len(m)-1)
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
@@ -197,69 +166,91 @@ func TestUsbNodeFor(t *testing.T) {
 	})
 }
 
+// writeMounts builds a hostRoot whose /proc/1/mounts holds the given lines.
+func writeMounts(t *testing.T, lines string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "proc/1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "proc/1/mounts"), []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return tmp
+}
+
 func TestMountedAt(t *testing.T) {
-	t.Run("returns mountpoint when device is present in mounts", func(t *testing.T) {
-		tmp := t.TempDir()
-		procDir := filepath.Join(tmp, "proc/1")
-		if err := os.MkdirAll(procDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		mounts := "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
-		if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte(mounts), 0644); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("reports the source mounted at the device's canonical mountpoint", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
 
-		mp, ok := MountedAt(tmp, "/dev/sdb1")
-		if !ok || mp != "/mnt/k8s-freeport-SN123" {
-			t.Errorf("MountedAt = (%q, %v), want (%q, true)", mp, ok, "/mnt/k8s-freeport-SN123")
+		source, mounted := MountedAt(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"})
+		if !mounted || source != "/dev/sdb1" {
+			t.Errorf("MountedAt = (%q, %v), want (%q, true)", source, mounted, "/dev/sdb1")
 		}
 	})
 
-	t.Run("returns not-ok when device is absent", func(t *testing.T) {
-		tmp := t.TempDir()
-		procDir := filepath.Join(tmp, "proc/1")
-		if err := os.MkdirAll(procDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte("/dev/sda1 / ext4 rw 0 0\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("reports not-mounted when the canonical mountpoint is free", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n")
 
-		_, ok := MountedAt(tmp, "/dev/sdb1")
-		if ok {
-			t.Errorf("MountedAt = ok, want not-ok")
+		if _, mounted := MountedAt(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"}); mounted {
+			t.Error("MountedAt = mounted, want not-mounted")
 		}
 	})
 
-	t.Run("returns not-ok when mounts file is missing", func(t *testing.T) {
-		tmp := t.TempDir()
-		_, ok := MountedAt(tmp, "/dev/sdb1")
-		if ok {
-			t.Errorf("MountedAt = ok, want not-ok")
+	t.Run("reports not-mounted when the mounts file is missing", func(t *testing.T) {
+		if _, mounted := MountedAt(t.TempDir(), Device{Serial: "SN123", DevPath: "/dev/sdb1"}); mounted {
+			t.Error("MountedAt = mounted, want not-mounted")
 		}
 	})
 
-	// Regression test for a real bug found on a live cluster: mount tables
-	// with tens of thousands of stacked duplicate mounts, because this
-	// idempotency check never actually matched anything.
-	t.Run("matches a hostRoot-prefixed devPath against the bare host path /proc/1/mounts actually records", func(t *testing.T) {
-		tmp := t.TempDir()
-		procDir := filepath.Join(tmp, "proc/1")
-		if err := os.MkdirAll(procDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		// What PID 1 (the real host) actually sees: no hostRoot prefix.
-		mounts := "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
-		if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte(mounts), 0644); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("last entry wins when mounts are stacked on one mountpoint", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n/dev/sdc1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
 
-		// What Discover() actually hands mountDevice/MountedAt: hostRoot-prefixed.
-		devPath := filepath.Join(tmp, "/dev/sdb1")
+		source, mounted := MountedAt(tmp, Device{Serial: "SN123", DevPath: "/dev/sdc1"})
+		if !mounted || source != "/dev/sdc1" {
+			t.Errorf("MountedAt = (%q, %v), want (%q, true) — the kernel resolves to the topmost mount", source, mounted, "/dev/sdc1")
+		}
+	})
+}
 
-		mp, ok := MountedAt(tmp, devPath)
-		if !ok || mp != "/mnt/k8s-freeport-SN123" {
-			t.Errorf("MountedAt(%q, %q) = (%q, %v), want (%q, true)", tmp, devPath, mp, ok, "/mnt/k8s-freeport-SN123")
+func TestIsMounted(t *testing.T) {
+	const mounts = "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
+
+	t.Run("true when this device holds its own canonical mountpoint", func(t *testing.T) {
+		tmp := writeMounts(t, mounts)
+		if !IsMounted(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"}) {
+			t.Error("IsMounted = false, want true")
+		}
+	})
+
+	// Regression test for a real bug found on a live cluster: mount tables with
+	// tens of thousands of stacked duplicate mounts, because the idempotency
+	// check compared a hostRoot-prefixed path against a bare one and so never
+	// matched anything.
+	t.Run("true for a hostRoot-prefixed DevPath against the bare path PID 1 records", func(t *testing.T) {
+		tmp := writeMounts(t, mounts)
+		// What Discover() actually hands us: hostRoot-prefixed.
+		dev := Device{Serial: "SN123", DevPath: filepath.Join(tmp, "/dev/sdb1")}
+		if !IsMounted(tmp, dev) {
+			t.Errorf("IsMounted(%q, %q) = false, want true", tmp, dev.DevPath)
+		}
+	})
+
+	// Regression test for pods failing NodePublishVolume with "no matching
+	// block devices" after a device was unplugged and replugged: the kernel
+	// re-enumerates it under a new node, so the mountpoint is still held by
+	// the old one. That is a stale mount to clear, not a mounted device.
+	t.Run("false when the mountpoint is held by a different, unplugged device node", func(t *testing.T) {
+		tmp := writeMounts(t, mounts)
+		if IsMounted(tmp, Device{Serial: "SN123", DevPath: "/dev/sdc1"}) {
+			t.Error("IsMounted = true for a mountpoint held by /dev/sdb1, want false")
+		}
+	})
+
+	t.Run("false when nothing is mounted at the canonical mountpoint", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n")
+		if IsMounted(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"}) {
+			t.Error("IsMounted = true, want false")
 		}
 	})
 }

@@ -35,8 +35,9 @@ func (d hostBlockDevice) String() string {
 func scanReadyDevices(hostRoot string) []hostBlockDevice {
 	var out []hostBlockDevice
 	for _, d := range devicescan.Discover(hostRoot) {
-		mp, ok := devicescan.MountedAt(hostRoot, d.DevPath)
-		if !ok {
+		// Same predicate the manager mounts by, so the two cannot disagree
+		// about which devices are ready.
+		if !devicescan.IsMounted(hostRoot, d) {
 			continue
 		}
 		out = append(out, hostBlockDevice{
@@ -44,7 +45,7 @@ func scanReadyDevices(hostRoot string) []hostBlockDevice {
 			model:        d.Model,
 			serial:       d.Serial,
 			partition:    d.Partition,
-			mountpoint:   mp,
+			mountpoint:   devicescan.Mountpoint(d.Serial),
 		})
 	}
 	return out

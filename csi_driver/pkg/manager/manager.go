@@ -14,7 +14,6 @@
 package manager
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -306,39 +305,53 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []mountedDevice)
 	return err
 }
 
+// maxStaleUnmounts bounds how many stacked mounts clearStaleMount will drain
+// from one mountpoint in a single pass, so a pathological mount table can't
+// stall a reconcile tick.
+const maxStaleUnmounts = 32
+
 // isMounted reports whether dev is already mounted at its canonical
-// mountpoint, so ensureMounted can skip it.
-//
-// It matches on either half of the mount entry — source device or destination
-// mountpoint — because a match on either one means mounting again would only
-// stack a duplicate on top. Both halves get the hostRoot prefix trimmed first:
-// Discover() yields hostRoot-prefixed paths ("/host/dev/sda1"), while
-// /proc/1/mounts belongs to the real host's init and records bare ones
-// ("/dev/sda1"), so the two forms never compare equal untrimmed.
+// mountpoint, so ensureMounted can skip it. Shared with pkg/driver, which
+// gates NodePublishVolume on the same answer.
 func (m *Manager) isMounted(dev devicescan.Device) bool {
-	f, err := os.Open(filepath.Join(m.hostRoot, "/proc/1/mounts"))
-	if err != nil {
-		util.Log.Error("cannot read mount table, assuming not mounted", "err", err)
-		return false
-	}
-	defer f.Close()
+	return devicescan.IsMounted(m.hostRoot, dev)
+}
 
-	// Applied to both sides, so it doesn't matter which form either started in.
-	bare := func(p string) string { return strings.TrimPrefix(p, m.hostRoot) }
-	wantSource, wantDest := bare(dev.DevPath), bare(devicescan.Mountpoint(dev.Serial))
+// clearStaleMount unmounts anything still occupying dev's canonical mountpoint
+// that isn't dev itself, and is a no-op when the mountpoint is free.
+//
+// This is the unplug/replug case. Yanking a stick doesn't unmount it, so its
+// entry lingers in the mount table pointing at a device node that no longer
+// exists. If it is replugged inside one reconcile interval the manager never
+// observes the gap, so cleanupMountpoint never runs — and because the kernel
+// usually re-enumerates the stick under a *new* node, the returning device no
+// longer matches the entry holding its mountpoint. Mounting on top would only
+// stack the live device behind a dead one, so the dead one is cleared first.
+func (m *Manager) clearStaleMount(dev devicescan.Device) {
+	source, mounted := devicescan.MountedAt(m.hostRoot, dev)
+	if !mounted {
+		return
+	}
 
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		parts := strings.Fields(sc.Text())
-		if len(parts) < 2 {
-			continue
-		}
-		if bare(parts[0]) == wantSource || bare(parts[1]) == wantDest {
-			util.Log.Debug("already mounted", "dev", dev.DevPath, "source", parts[0], "dest", parts[1])
-			return true
+	mountpoint := devicescan.Mountpoint(dev.Serial)
+	hostMountpoint := filepath.Join(m.hostRoot, mountpoint)
+	util.Log.Info("clearing stale mount before remounting reconnected device",
+		"mp", mountpoint, "staleSource", source, "dev", dev.DevPath)
+
+	// Detach rather than unmount: the backing device is typically gone, and a
+	// plain unmount of a dead device can block or fail EBUSY. Loops because
+	// duplicates may have stacked on this mountpoint.
+	for range maxStaleUnmounts {
+		if err := syscall.Unmount(hostMountpoint, syscall.MNT_DETACH); err != nil {
+			// EINVAL means nothing is mounted here any more — fully drained.
+			if !errors.Is(err, syscall.EINVAL) {
+				util.Log.Error("unmounting stale mountpoint failed", "path", hostMountpoint, "err", err)
+			}
+			return
 		}
 	}
-	return false
+	util.Log.Error("stale mountpoint still occupied after draining, leaving for manual inspection",
+		"path", hostMountpoint, "unmounts", maxStaleUnmounts)
 }
 
 // mountDevice ensures dev is mounted at its canonical host mountpoint.
@@ -400,6 +413,9 @@ func (m *Manager) ensureMounted(discovered []devicescan.Device) []mountedDevice 
 		if m.mountFailures[d.DevPath] >= maxMountFailures {
 			continue
 		}
+		// Not mounted, but the mountpoint may still be held by the node this
+		// device had before it was unplugged and replugged.
+		m.clearStaleMount(d)
 		mp := m.mountFn(d)
 		if mp == "" {
 			m.mountFailures[d.DevPath]++

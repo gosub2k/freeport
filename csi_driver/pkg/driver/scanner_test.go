@@ -76,6 +76,51 @@ func TestScanReadyDevices(t *testing.T) {
 		}
 	})
 
+	// Regression test for NodePublishVolume failing "no matching block devices
+	// on node" after an unplug/replug. The device is back under a new node,
+	// but its canonical mountpoint is still held by the old one, so what is
+	// mounted there is dead. Reporting it ready would hand a pod a mountpoint
+	// backed by a device that no longer exists; the manager clears the stale
+	// entry and remounts, and only then is the device ready.
+	t.Run("device whose mountpoint is still held by its previous node is not ready", func(t *testing.T) {
+		tmp := t.TempDir()
+		devRoot := filepath.Join(tmp, "dev")
+		devDir := filepath.Join(tmp, "dev/disk/by-id")
+		sysClassBlock := filepath.Join(tmp, "sys/class/block")
+		procDir := filepath.Join(tmp, "proc/1")
+		for _, d := range []string{devRoot, devDir, sysClassBlock, procDir} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// The stick came back as sdc1; the mount table still records sdb1.
+		realDev := filepath.Join(devRoot, "sdc1")
+		writeAttr(t, devRoot, "sdc1", "")
+		usbNode := filepath.Join(tmp, "sys/devices/usb1")
+		if err := os.MkdirAll(usbNode, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeAttr(t, usbNode, "serial", "SN123")
+		writeAttr(t, usbNode, "manufacturer", "Acme")
+		writeAttr(t, usbNode, "product", "USB Drive")
+		if err := os.Symlink(usbNode, filepath.Join(sysClassBlock, "sdc1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(realDev, filepath.Join(devDir, "usb-reconnected-part1")); err != nil {
+			t.Fatal(err)
+		}
+
+		mounts := "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n"
+		if err := os.WriteFile(filepath.Join(procDir, "mounts"), []byte(mounts), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := scanReadyDevices(tmp); len(got) != 0 {
+			t.Errorf("got %+v, want no ready devices — /mnt/k8s-freeport-SN123 is still held by the unplugged /dev/sdb1", got)
+		}
+	})
+
 	t.Run("no devices discovered returns nil", func(t *testing.T) {
 		tmp := t.TempDir()
 		got := scanReadyDevices(tmp)

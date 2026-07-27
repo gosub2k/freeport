@@ -4,93 +4,79 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"freeport/pkg/devicescan"
 )
 
-func TestIsMounted(t *testing.T) {
-	// writeMounts builds a hostRoot whose /proc/1/mounts holds the given lines.
-	writeMounts := func(t *testing.T, lines string) string {
-		t.Helper()
-		tmp := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(tmp, "proc/1"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, "proc/1/mounts"), []byte(lines), 0644); err != nil {
-			t.Fatal(err)
-		}
-		return tmp
+// writeMounts builds a hostRoot whose /proc/1/mounts holds the given lines.
+func writeMounts(t *testing.T, lines string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "proc/1"), 0755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(tmp, "proc/1/mounts"), []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return tmp
+}
 
-	tests := []struct {
-		name   string
-		mounts string
-		dev    devicescan.Device
-		want   bool
-	}{
-		{
-			name:   "source matches, both sides bare",
-			mounts: "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
-			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
-			want:   true,
-		},
-		{
-			// The mount-table-explosion bug: Discover() hands us a
-			// hostRoot-prefixed DevPath, PID 1 records the bare one.
-			name:   "source matches a hostRoot-prefixed DevPath against a bare mount entry",
-			mounts: "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
-			dev:    devicescan.Device{Serial: "SN123", DevPath: "HOSTROOT/dev/sdb1"},
-			want:   true,
-		},
-		{
-			// Something is already occupying the canonical mountpoint, so
-			// mounting again would stack a duplicate on top of it.
-			name:   "destination matches even when the source device differs",
-			mounts: "/dev/sdz9 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
-			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
-			want:   true,
-		},
-		{
-			name:   "neither source nor destination matches",
-			mounts: "/dev/sda1 / ext4 rw 0 0\n/dev/sdz9 /mnt/k8s-freeport-OTHER vfat rw 0 0\n",
-			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
-			want:   false,
-		},
-		{
-			name:   "empty mount table",
-			mounts: "",
-			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
-			want:   false,
-		},
-		{
-			name:   "short lines are skipped, not treated as a match",
-			mounts: "garbage\n\n/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n",
-			dev:    devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"},
-			want:   true,
+// Regression test for pods failing NodePublishVolume with "no matching block
+// devices on node" after a device was unplugged and replugged.
+//
+// Yanking a stick doesn't unmount it, so its entry lingers in the mount table.
+// Replug it inside one reconcile interval and the manager never observes the
+// gap, so cleanupMountpoint never runs — and the kernel usually brings the
+// stick back under a *new* device node. Treating the still-occupied mountpoint
+// as proof the device is mounted made the manager skip it while labelling the
+// node, so pods scheduled there and then could not publish.
+func TestEnsureMounted_remountsDeviceThatReturnedOnANewDevPath(t *testing.T) {
+	tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
+
+	var mountedDev string
+	m := &Manager{
+		hostRoot:      tmp,
+		mountFailures: map[string]int{},
+		mountFn: func(dev devicescan.Device) string {
+			mountedDev = dev.DevPath
+			return devicescan.Mountpoint(dev.Serial)
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmp := writeMounts(t, tt.mounts)
-			dev := tt.dev
-			dev.DevPath = strings.Replace(dev.DevPath, "HOSTROOT", tmp, 1)
+	// Same serial, new device node — the mountpoint is still held by /dev/sdb1.
+	got := m.ensureMounted([]devicescan.Device{{Serial: "SN123", DevPath: "/dev/sdc1"}})
 
-			m := &Manager{hostRoot: tmp}
-			if got := m.isMounted(dev); got != tt.want {
-				t.Errorf("isMounted(%q) = %v, want %v", dev.DevPath, got, tt.want)
-			}
-		})
+	if mountedDev != "/dev/sdc1" {
+		t.Errorf("mountFn called with %q, want /dev/sdc1 — the reconnected device must be remounted, not skipped", mountedDev)
+	}
+	if len(got) != 1 || got[0].mountpoint != "/mnt/k8s-freeport-SN123" {
+		t.Fatalf("ensureMounted = %+v, want the device reported at its canonical mountpoint", got)
+	}
+}
+
+// The other half of the same decision: a device genuinely mounted where it
+// belongs must not be mounted again, which is what stacked duplicate mounts.
+func TestEnsureMounted_skipsDeviceAlreadyMountedAtItsCanonicalMountpoint(t *testing.T) {
+	tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
+
+	calls := 0
+	m := &Manager{
+		hostRoot:      tmp,
+		mountFailures: map[string]int{},
+		mountFn:       func(devicescan.Device) string { calls++; return "" },
 	}
 
-	t.Run("missing mounts file reports not mounted", func(t *testing.T) {
-		m := &Manager{hostRoot: t.TempDir()}
-		if m.isMounted(devicescan.Device{Serial: "SN123", DevPath: "/dev/sdb1"}) {
-			t.Error("isMounted = true, want false when /proc/1/mounts is unreadable")
-		}
-	})
+	// hostRoot-prefixed, as Discover() actually yields it.
+	dev := devicescan.Device{Serial: "SN123", DevPath: filepath.Join(tmp, "/dev/sdb1")}
+	got := m.ensureMounted([]devicescan.Device{dev})
+
+	if calls != 0 {
+		t.Errorf("mountFn called %d times, want 0 — remounting stacks a duplicate", calls)
+	}
+	if len(got) != 1 || got[0].mountpoint != "/mnt/k8s-freeport-SN123" {
+		t.Fatalf("ensureMounted = %+v, want the already-mounted device reported once", got)
+	}
 }
 
 func TestMountDevice_notMountedAttemptsRealMount(t *testing.T) {
