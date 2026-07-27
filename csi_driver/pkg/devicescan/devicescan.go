@@ -4,9 +4,7 @@
 //
 // It is the one place both pkg/manager (which mounts devices) and pkg/driver
 // (which publishes what the manager prepared) get their answers from, so the
-// two cannot drift apart. That matters: when they disagree about whether a
-// device is ready, the manager labels the node while the driver refuses to
-// publish, and pods schedule somewhere they cannot mount.
+// two cannot drift apart.
 package devicescan
 
 import (
@@ -22,8 +20,7 @@ import (
 
 const Maxk8sLabelLength = 63
 
-// Device is a USB block device partition discovered via sysfs. It carries the
-// hostRoot it was discovered under so its mount methods need no extra context.
+// Device is a USB block device partition discovered via sysfs.
 type Device struct {
 	Manufacturer string
 	Model        string
@@ -31,9 +28,7 @@ type Device struct {
 	Partition    int
 	DevPath      string // real device node, e.g. "/dev/sdb1"
 
-	// HostRoot is where the real host's filesystem is bind-mounted into this
-	// container, e.g. "/host". Paths this process resolves carry it as a
-	// prefix; paths the host's own PID 1 records never do.
+	// HostRoot is where the real host's filesystem is bind-mounted.
 	HostRoot string
 }
 
@@ -46,13 +41,8 @@ func (d Device) String() string {
 }
 
 // Label is the device's "<manufacturer>-<model>" topology name.
-func (d Device) Label() string {
-	return DeviceLabel(d.Manufacturer, d.Model)
-}
-
-// DeviceLabel builds the canonical "<manufacturer>-<model>" topology name
-// for a device, e.g. "sandisk-cruzer".
-func DeviceLabel(manufacturer, model string) string {
+func (dv Device) Label() string {
+	model, manufacturer := dv.Manufacturer, dv.Model
 
 	// See https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
 	k8sLabel := func(s string) string {
@@ -89,38 +79,187 @@ func DeviceLabel(manufacturer, model string) string {
 	return m + sep + d
 }
 
-// usbNodeFor walks sysfs up from the block device until it finds a directory
-// containing a "serial" file — that is the USB device node carrying
-// manufacturer/product/serial attributes.
-func usbNodeFor(device, sysClassBlock string) string {
+// Avoid stall on a pathological mount table.
+const maxStaleUnmounts = 32
 
-	base := filepath.Base(device)
-	d, err := filepath.EvalSymlinks(filepath.Join(sysClassBlock, base))
+// Mountpoint is where d belongs, as the host sees it.
+func (d Device) Mountpoint() string {
+	return fmt.Sprintf("/mnt/k8s-freeport-%s", serial)
+}
+
+// HostMountpoint is Mountpoint as this process sees it.
+func (d Device) HostMountpoint() string {
+	return filepath.Join(d.HostRoot, d.Mountpoint())
+}
+
+// bare strips the hostRoot prefix from p. Applied to both sides of every
+// comparison, so it doesn't matter which form either started in: paths this
+// process resolves are hostRoot-prefixed ("/host/dev/sda1"), while
+// /proc/1/mounts belongs to the real host's init and records bare ones
+// ("/dev/sda1"), and the two never compare equal untrimmed.
+func (d Device) bare(p string) string {
+	return strings.TrimPrefix(p, d.HostRoot)
+}
+
+// MountedAt reports which source device is mounted at d's canonical
+// mountpoint, if anything is.
+//
+// It is keyed on the mountpoint rather than on the device node because a
+// device node is not stable across a replug while the serial — and therefore
+// the mountpoint — is. Callers compare the returned source against the device
+// they expect, so a mountpoint still held by a previous, now-unplugged node is
+// recognized as stale rather than mistaken for the device being mounted.
+//
+// When entries stack on one mountpoint the last wins, which is the one the
+// kernel resolves accesses to.
+func (d Device) MountedAt() (source string, mounted bool) {
+	f, err := os.Open(filepath.Join(d.HostRoot, "/proc/1/mounts"))
 	if err != nil {
+		util.Log.Debug("cannot read mount table", "err", err)
+		return "", false
+	}
+	defer f.Close()
+
+	want := d.bare(d.Mountpoint())
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		parts := strings.Fields(sc.Text())
+		if len(parts) >= 2 && d.bare(parts[1]) == want {
+			source, mounted = d.bare(parts[0]), true
+		}
+	}
+	return source, mounted
+}
+
+// IsMounted reports whether d itself is currently mounted at its canonical
+// mountpoint. A mountpoint left occupied by a different (usually just
+// unplugged) device node is deliberately not "mounted": see MountedAt.
+func (d Device) IsMounted() bool {
+	source, mounted := d.MountedAt()
+	return mounted && source == d.bare(d.DevPath)
+}
+
+// FreeBytes reports space available on d's mountpoint, or 0 if it can't be read.
+func (d Device) FreeBytes() int64 {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(d.HostMountpoint(), &st); err != nil {
+		return 0
+	}
+	return int64(st.Bavail) * st.Bsize
+}
+
+// IsSwap reports whether d is formatted as Linux swap.
+func (d Device) IsSwap() bool {
+	// Sysfs doesn't report fs type if its not mounted, use command.
+	out, err := exec.Command("blkid", "-o", "value", "-s", "TYPE", d.DevPath).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(blkidOutput) == "swap"
+}
+
+// Mount mounts d at its canonical mountpoint and returns that mountpoint, or
+// "" on failure.
+func (d Device) Mount() string {
+	if d.IsSwap() {
+		util.Log.Debug("skipping swap partition", "dev", d.DevPath)
 		return ""
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(d, "serial")); err == nil {
-			return d
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			break
-		}
-		d = parent
+
+	if err := os.MkdirAll(d.HostMountpoint(), 0750); err != nil {
+		util.Log.Error("mkdir failed", "path", d.HostMountpoint(), "err", err)
+		return ""
 	}
-	return ""
+
+	// REVISIT: consider mounting with -o sync to reduce chance of dirty filesystem if media removed.
+	if out, err := exec.Command("mount" /* "-o", "sync", */, d.DevPath, d.HostMountpoint()).CombinedOutput(); err != nil {
+		util.Log.Error("mount failed", "dev", d.DevPath, "mp", d.HostMountpoint(), "err", err, "output", strings.TrimSpace(string(out)))
+		return ""
+	}
+	util.Log.Info("MOUNTED", "dev", d.DevPath, "mp", d.Mountpoint())
+	return d.Mountpoint()
+}
+
+// ClearStaleMount unmounts anything still occupying d's canonical mountpoint
+// that isn't d itself, and is a no-op when the mountpoint is free.
+func (d Device) ClearStaleMount() {
+	source, mounted := d.MountedAt()
+	if !mounted {
+		return
+	}
+
+	util.Log.Info("clearing stale mount before remounting reconnected device",
+		"mp", d.Mountpoint(), "staleSource", source, "dev", d.DevPath)
+
+	// Detach rather than unmount: the backing device is typically gone, and a
+	// plain unmount of a dead device can block or fail EBUSY. Loops because
+	// duplicates may have stacked on this mountpoint.
+	for range maxStaleUnmounts {
+		if err := syscall.Unmount(d.HostMountpoint(), syscall.MNT_DETACH); err != nil {
+			// EINVAL means nothing is mounted here any more — fully drained.
+			if !errors.Is(err, syscall.EINVAL) {
+				util.Log.Error("unmounting stale mountpoint failed", "path", d.HostMountpoint(), "err", err)
+			}
+			return
+		}
+	}
+	util.Log.Error("stale mountpoint still occupied after draining, leaving for manual inspection",
+		"path", d.HostMountpoint(), "unmounts", maxStaleUnmounts)
+}
+
+// Unmount unmounts d and removes its mountpoint directory, for a device that
+// has just been unplugged.
+func (d Device) Unmount() {
+	hostMountpoint := d.HostMountpoint()
+
+	if err := syscall.Unmount(hostMountpoint, 0); err != nil && err != syscall.EINVAL && err != syscall.ENOENT {
+		util.Log.Error("unmount failed for removed device", "path", hostMountpoint, "err", err)
+	}
+
+	switch err := os.Remove(hostMountpoint); {
+	case err == nil:
+		util.Log.Info("removed mountpoint for unplugged device", "path", hostMountpoint)
+	case os.IsNotExist(err):
+		// already gone — nothing to do.
+	case errors.Is(err, syscall.ENOTEMPTY):
+		util.Log.Error("mountpoint not empty after device removal, something went wrong — leaving it for manual inspection", "path", hostMountpoint)
+	default:
+		util.Log.Error("cannot remove mountpoint for removed device", "path", hostMountpoint, "err", err)
+	}
 }
 
 // Discover walks hostRoot's /dev/disk/by-id for usb-...-partN symlinks and
 // resolves manufacturer/product/serial via sysfs.
 func Discover(hostRoot string) []Device {
-	readSysAttr := func(path string) string {
+	fileContents := func(path string) string {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return ""
 		}
 		return strings.TrimSpace(string(b))
+	}
+
+	// usbDir walks sysfs up from the block device until it finds a directory
+	// containing a "serial" file — that is the USB device node carrying
+	// manufacturer/product/serial attributes.
+	usbDir := func(device, sysClassBlock string) string {
+		base := filepath.Base(device)
+		d, err := filepath.EvalSymlinks(filepath.Join(sysClassBlock, base))
+		if err != nil {
+			return ""
+		}
+		for {
+			if _, err := os.Stat(filepath.Join(d, "serial")); err == nil {
+				return d
+			}
+			parent := filepath.Dir(d)
+			if parent == d {
+				break
+			}
+			d = parent
+		}
+		return ""
 	}
 
 	diskById := filepath.Join(hostRoot, "/dev/disk/by-id")
@@ -138,24 +277,24 @@ func Discover(hostRoot string) []Device {
 		if m := usbPartRegexp.FindStringSubmatch(e.Name()); m != nil {
 			partition, _ := strconv.Atoi(m[1])
 
-			device, err := filepath.EvalSymlinks(filepath.Join(diskById, e.Name()))
+			devicePath, err := filepath.EvalSymlinks(filepath.Join(diskById, e.Name()))
 			if err != nil {
 				util.Log.Debug("filepath.EvalSymlinks", "err", err)
 				continue
 			}
 
-			usbNode := usbNodeFor(device, filepath.Join(hostRoot, "/sys/class/block"))
+			usbNode := usbDir(devicePath, filepath.Join(hostRoot, "/sys/class/block"))
 			if usbNode == "" {
-				util.Log.Info("no USB sysfs node", "device", device)
+				util.Log.Info("no USB sysfs node", "device", devicePath)
 				continue
 			}
 
 			devs = append(devs, Device{
-				Manufacturer: readSysAttr(filepath.Join(usbNode, "manufacturer")),
-				Model:        readSysAttr(filepath.Join(usbNode, "product")),
-				Serial:       readSysAttr(filepath.Join(usbNode, "serial")),
+				Manufacturer: fileContents(filepath.Join(usbNode, "manufacturer")),
+				Model:        fileContents(filepath.Join(usbNode, "product")),
+				Serial:       fileContents(filepath.Join(usbNode, "serial")),
 				Partition:    partition,
-				DevPath:      device,
+				DevPath:      devicePath,
 				HostRoot:     hostRoot,
 			})
 		}
@@ -163,9 +302,7 @@ func Discover(hostRoot string) []Device {
 	return devs
 }
 
-// DiscoverMounted returns only the discovered devices that are actually
-// mounted at their canonical mountpoint — the ones pkg/manager has finished
-// preparing, and so the only ones pkg/driver may publish.
+// DiscoverMounted returns only the discovered devices that are mounted.
 func DiscoverMounted(hostRoot string) []Device {
 	var out []Device
 	for _, d := range Discover(hostRoot) {
@@ -177,10 +314,7 @@ func DiscoverMounted(hostRoot string) []Device {
 }
 
 // MatchVolumeContext returns the subset of devices satisfying every topology
-// segment in vc whose key starts with driverName+"/". Segments are expected in
-// the form "<driverName>/<manufacturer>-<model>=true"; keys belonging to any
-// other driver are ignored. A device carries exactly one label, so two
-// distinct driver-prefixed keys can never both match.
+// segment in vc whose key starts with driverName+"/".
 func MatchVolumeContext(devices []Device, driverName string, vc map[string]string) []Device {
 	prefix := driverName + "/"
 	var matched []Device
