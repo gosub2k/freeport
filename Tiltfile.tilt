@@ -48,3 +48,17 @@ k8s_yaml(kustomize_yaml)
 k8s_resource(workload='freeport-csi-controller', port_forwards=[])
 k8s_resource(workload='freeport-csi-driver',     port_forwards=[])
 k8s_resource(workload='freeport-manager',        port_forwards=[])
+
+#   DEPLOY_TEST_WORKLOAD=1 tilt up --file Tiltfile.tilt
+if os.environ.get('DEPLOY_TEST_WORKLOAD', '') != '':
+    k8s_yaml(kustomize('kustomize/test-workload'))
+    k8s_resource(
+        workload='test-csi-driver-narrow',
+        # Attached explicitly, otherwise these land in Tilt's "uncategorized"
+        # resource instead of alongside the workload they belong to.
+        objects=[
+            'freeport-test:namespace',
+            'scratch-pvc-narrow:persistentvolumeclaim',
+        ],
+        port_forwards=[],
+    )

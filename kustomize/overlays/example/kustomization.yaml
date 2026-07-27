@@ -1,13 +1,6 @@
-# This is the author's personal dev-loop overlay (see Tiltfile.tilt /
-# START_TILT.sh, which point KUSTOMIZE_DIR at this directory) — not a
-# generic example for other users to copy verbatim. It's built for a
-# specific microk8s cluster with specific USB devices already plugged in:
-# freeport-unknown-usb-disk needs any USB stick whose descriptor doesn't
-# parse to a known manufacturer/model, and freeport-sandisk-cruzer needs a
-# real SanDisk Cruzer plugged into some node. Nothing here rewrites image
-# references (unlike a typical "consume published images" overlay would) —
-# Tilt's docker_build/custom_build calls match on the localhost:32000/...
-# refs already in base for live-update, so this overlay must leave them as-is.
+# This is the not a generic example: It's built for a
+# specific microk8s cluster with specific USB devices already plugged in/
+
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: freeport
@@ -15,4 +8,3 @@ namespace: freeport
 resources:
   - ../../base
   - storageclasses.yaml
-  - deployment-narrow.yaml
