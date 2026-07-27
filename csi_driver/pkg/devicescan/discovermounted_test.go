@@ -1,4 +1,4 @@
-package driver
+package devicescan
 
 import (
 	"os"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestScanReadyDevices(t *testing.T) {
+func TestDiscoverMounted(t *testing.T) {
 	t.Run("only devices already mounted by the manager are returned", func(t *testing.T) {
 		tmp := t.TempDir()
 		devRoot := filepath.Join(tmp, "dev")
@@ -64,15 +64,15 @@ func TestScanReadyDevices(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := scanReadyDevices(tmp)
+		got := DiscoverMounted(tmp)
 		if len(got) != 1 {
 			t.Fatalf("got %d ready devices, want 1: %+v", len(got), got)
 		}
-		if got[0].serial != "SN123" || got[0].mountpoint != "/mnt/k8s-freeport-SN123" {
+		if got[0].Serial != "SN123" || got[0].Mountpoint() != "/mnt/k8s-freeport-SN123" {
 			t.Errorf("got %+v, want serial SN123 mounted at /mnt/k8s-freeport-SN123", got[0])
 		}
-		if got[0].manufacturer != "Acme" || got[0].model != "USB Drive" {
-			t.Errorf("got manufacturer=%q model=%q, want Acme/USB Drive", got[0].manufacturer, got[0].model)
+		if got[0].Manufacturer != "Acme" || got[0].Model != "USB Drive" {
+			t.Errorf("got manufacturer=%q model=%q, want Acme/USB Drive", got[0].Manufacturer, got[0].Model)
 		}
 	})
 
@@ -116,14 +116,14 @@ func TestScanReadyDevices(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if got := scanReadyDevices(tmp); len(got) != 0 {
+		if got := DiscoverMounted(tmp); len(got) != 0 {
 			t.Errorf("got %+v, want no ready devices — /mnt/k8s-freeport-SN123 is still held by the unplugged /dev/sdb1", got)
 		}
 	})
 
 	t.Run("no devices discovered returns nil", func(t *testing.T) {
 		tmp := t.TempDir()
-		got := scanReadyDevices(tmp)
+		got := DiscoverMounted(tmp)
 		if got != nil {
 			t.Errorf("got %+v, want nil", got)
 		}

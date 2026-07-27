@@ -13,7 +13,7 @@ import (
 	"freeport/pkg/devicescan"
 )
 
-func serials(devices []mountedDevice) []string {
+func serials(devices []devicescan.Device) []string {
 	if len(devices) == 0 {
 		return nil
 	}
@@ -26,44 +26,44 @@ func serials(devices []mountedDevice) []string {
 }
 
 func TestDeviceDelta(t *testing.T) {
-	a := mountedDevice{Device: devicescan.Device{Serial: "A"}}
-	b := mountedDevice{Device: devicescan.Device{Serial: "B"}}
-	c := mountedDevice{Device: devicescan.Device{Serial: "C"}}
+	a := devicescan.Device{Serial: "A"}
+	b := devicescan.Device{Serial: "B"}
+	c := devicescan.Device{Serial: "C"}
 
 	tests := []struct {
 		name        string
-		prev, curr  map[string]mountedDevice
+		prev, curr  map[string]devicescan.Device
 		wantAdded   []string
 		wantRemoved []string
 	}{
 		{
 			name: "no change reports nothing",
-			prev: map[string]mountedDevice{"A": a, "B": b},
-			curr: map[string]mountedDevice{"A": a, "B": b},
+			prev: map[string]devicescan.Device{"A": a, "B": b},
+			curr: map[string]devicescan.Device{"A": a, "B": b},
 		},
 		{
 			name:      "new device is added",
-			prev:      map[string]mountedDevice{"A": a},
-			curr:      map[string]mountedDevice{"A": a, "B": b},
+			prev:      map[string]devicescan.Device{"A": a},
+			curr:      map[string]devicescan.Device{"A": a, "B": b},
 			wantAdded: []string{"B"},
 		},
 		{
 			name:        "unplugged device is removed",
-			prev:        map[string]mountedDevice{"A": a, "B": b},
-			curr:        map[string]mountedDevice{"A": a},
+			prev:        map[string]devicescan.Device{"A": a, "B": b},
+			curr:        map[string]devicescan.Device{"A": a},
 			wantRemoved: []string{"B"},
 		},
 		{
 			name:        "add and remove in the same tick",
-			prev:        map[string]mountedDevice{"A": a, "B": b},
-			curr:        map[string]mountedDevice{"A": a, "C": c},
+			prev:        map[string]devicescan.Device{"A": a, "B": b},
+			curr:        map[string]devicescan.Device{"A": a, "C": c},
 			wantAdded:   []string{"C"},
 			wantRemoved: []string{"B"},
 		},
 		{
 			name:      "first tick with no prior state reports everything as added",
-			prev:      map[string]mountedDevice{},
-			curr:      map[string]mountedDevice{"A": a, "B": b},
+			prev:      map[string]devicescan.Device{},
+			curr:      map[string]devicescan.Device{"A": a, "B": b},
 			wantAdded: []string{"A", "B"},
 		},
 	}
@@ -81,9 +81,9 @@ func TestDeviceDelta(t *testing.T) {
 }
 
 func TestDesiredLabels(t *testing.T) {
-	devices := []mountedDevice{
-		{Device: devicescan.Device{Manufacturer: "Acme", Model: "USB Drive", Serial: "SN123"}, mountpoint: "/mnt/k8s-freeport-SN123"},
-		{Device: devicescan.Device{Manufacturer: "Generic", Model: "Flash Drive", Serial: "SN456"}, mountpoint: "/mnt/k8s-freeport-SN456"},
+	devices := []devicescan.Device{
+		{Manufacturer: "Acme", Model: "USB Drive", Serial: "SN123"},
+		{Manufacturer: "Generic", Model: "Flash Drive", Serial: "SN456"},
 	}
 
 	got := desiredLabels("freeport.local", devices)
@@ -210,7 +210,7 @@ func TestSyncTopologyKeys_updatesStaleKeys(t *testing.T) {
 	clientset := fake.NewSimpleClientset(csiNode)
 	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
 
-	mounted := []mountedDevice{{Device: devicescan.Device{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}}
+	mounted := []devicescan.Device{{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}
 	if err := m.syncTopologyKeys(context.Background(), mounted); err != nil {
 		t.Fatalf("syncTopologyKeys = %v", err)
 	}
@@ -245,7 +245,7 @@ func TestSyncTopologyKeys_noopWhenAlreadyCurrent(t *testing.T) {
 	clientset := fake.NewSimpleClientset(csiNode)
 	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
 
-	mounted := []mountedDevice{{Device: devicescan.Device{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}}
+	mounted := []devicescan.Device{{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}
 	if err := m.syncTopologyKeys(context.Background(), mounted); err != nil {
 		t.Fatalf("syncTopologyKeys = %v", err)
 	}

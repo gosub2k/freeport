@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"freeport/pkg/devicescan"
 	"freeport/pkg/util"
 )
 
@@ -19,21 +20,22 @@ import (
 // WithNoScan replaces USB device scanning with a no-op. Use in tests.
 func WithNoScan() func(*NodeServer) {
 	return func(ns *NodeServer) {
-		ns.scanFn = func(string) []hostBlockDevice { return nil }
+		ns.scanFn = func(string) []devicescan.Device { return nil }
 	}
 }
 
 // WithFakeDevice replaces the scanner with one that returns a single synthetic
-// device whose mountpoint is mountpointDir. Use in tests.
-func WithFakeDevice(mountpointDir string) func(*NodeServer) {
+// device rooted at hostRoot, so its mountpoint lands under that directory
+// rather than the real host's. Use in tests.
+func WithFakeDevice(hostRoot string) func(*NodeServer) {
 	return func(ns *NodeServer) {
-		ns.scanFn = func(string) []hostBlockDevice {
-			return []hostBlockDevice{{
-				serial:       "test-serial",
-				manufacturer: "Test Co",
-				model:        "Test USB",
-				partition:    1,
-				mountpoint:   mountpointDir,
+		ns.scanFn = func(string) []devicescan.Device {
+			return []devicescan.Device{{
+				Serial:       "test-serial",
+				Manufacturer: "Test Co",
+				Model:        "Test USB",
+				Partition:    1,
+				HostRoot:     hostRoot,
 			}}
 		}
 	}
@@ -55,7 +57,7 @@ type NodeServer struct {
 	hostRoot   string
 	nodeID     string
 	driverName string
-	scanFn     func(hostRoot string) []hostBlockDevice
+	scanFn     func(hostRoot string) []devicescan.Device
 	mountFn    func(source, target, fstype string, flags uintptr, data string) error
 }
 
@@ -65,7 +67,7 @@ func NewNodeServer(nodeID, hostRoot, driverName string, opts ...func(*NodeServer
 		nodeID:     nodeID,
 		hostRoot:   hostRoot,
 		driverName: driverName,
-		scanFn:     scanReadyDevices,
+		scanFn:     devicescan.DiscoverMounted,
 		mountFn:    syscall.Mount,
 	}
 	for _, opt := range opts {
@@ -93,7 +95,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	scanned := ns.scanFn(ns.hostRoot)
 	util.Log.Info("scanned devices", "total", len(scanned))
 
-	candidates := matchVolumeContext(scanned, ns.driverName, req.VolumeContext)
+	candidates := devicescan.MatchVolumeContext(scanned, ns.driverName, req.VolumeContext)
 	if len(candidates) == 0 {
 		util.Log.Error("no matching block devices on node", "node", ns.nodeID)
 		return nil, status.Errorf(codes.ResourceExhausted, "no matching block devices on node %s", ns.nodeID)
@@ -101,12 +103,12 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	util.Log.Info("matched devices", "count", len(candidates))
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].serial < candidates[j].serial
+		return candidates[i].Serial < candidates[j].Serial
 	})
 	dev := candidates[0]
-	util.Log.Info("selected device", "serial", dev.serial, "mountpoint", dev.mountpoint)
+	util.Log.Info("selected device", "serial", dev.Serial, "mountpoint", dev.Mountpoint())
 
-	volPath := filepath.Join(ns.hostRoot, dev.mountpoint, volumeID)
+	volPath := filepath.Join(dev.HostMountpoint(), volumeID)
 	util.Log.Info("ensuring volume directory exists", "path", volPath)
 	if err := os.MkdirAll(volPath, 0750); err != nil {
 		util.Log.Error("failed to create volume directory", "path", volPath, "err", err)

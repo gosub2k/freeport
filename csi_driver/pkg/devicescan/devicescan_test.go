@@ -25,7 +25,7 @@ func TestDeviceLabel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := DeviceLabel(tt.manufacturer, tt.model)
 			if got != tt.want {
-				t.Errorf("DeviceClassKey(%q, %q) = %q, want %q", tt.manufacturer, tt.model, got, tt.want)
+				t.Errorf("DeviceLabel(%q, %q) = %q, want %q", tt.manufacturer, tt.model, got, tt.want)
 			}
 			if len(got) > Maxk8sLabelLength {
 				t.Errorf("result length %d exceeds %d", len(got), Maxk8sLabelLength)
@@ -183,7 +183,7 @@ func TestMountedAt(t *testing.T) {
 	t.Run("reports the source mounted at the device's canonical mountpoint", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
 
-		source, mounted := MountedAt(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"})
+		source, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}).MountedAt()
 		if !mounted || source != "/dev/sdb1" {
 			t.Errorf("MountedAt = (%q, %v), want (%q, true)", source, mounted, "/dev/sdb1")
 		}
@@ -192,13 +192,13 @@ func TestMountedAt(t *testing.T) {
 	t.Run("reports not-mounted when the canonical mountpoint is free", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n")
 
-		if _, mounted := MountedAt(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"}); mounted {
+		if _, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}).MountedAt(); mounted {
 			t.Error("MountedAt = mounted, want not-mounted")
 		}
 	})
 
 	t.Run("reports not-mounted when the mounts file is missing", func(t *testing.T) {
-		if _, mounted := MountedAt(t.TempDir(), Device{Serial: "SN123", DevPath: "/dev/sdb1"}); mounted {
+		if _, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: t.TempDir()}).MountedAt(); mounted {
 			t.Error("MountedAt = mounted, want not-mounted")
 		}
 	})
@@ -206,7 +206,7 @@ func TestMountedAt(t *testing.T) {
 	t.Run("last entry wins when mounts are stacked on one mountpoint", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n/dev/sdc1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
 
-		source, mounted := MountedAt(tmp, Device{Serial: "SN123", DevPath: "/dev/sdc1"})
+		source, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdc1", HostRoot: tmp}).MountedAt()
 		if !mounted || source != "/dev/sdc1" {
 			t.Errorf("MountedAt = (%q, %v), want (%q, true) — the kernel resolves to the topmost mount", source, mounted, "/dev/sdc1")
 		}
@@ -218,7 +218,7 @@ func TestIsMounted(t *testing.T) {
 
 	t.Run("true when this device holds its own canonical mountpoint", func(t *testing.T) {
 		tmp := writeMounts(t, mounts)
-		if !IsMounted(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"}) {
+		if !(Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}).IsMounted() {
 			t.Error("IsMounted = false, want true")
 		}
 	})
@@ -230,8 +230,8 @@ func TestIsMounted(t *testing.T) {
 	t.Run("true for a hostRoot-prefixed DevPath against the bare path PID 1 records", func(t *testing.T) {
 		tmp := writeMounts(t, mounts)
 		// What Discover() actually hands us: hostRoot-prefixed.
-		dev := Device{Serial: "SN123", DevPath: filepath.Join(tmp, "/dev/sdb1")}
-		if !IsMounted(tmp, dev) {
+		dev := Device{Serial: "SN123", DevPath: filepath.Join(tmp, "/dev/sdb1"), HostRoot: tmp}
+		if !dev.IsMounted() {
 			t.Errorf("IsMounted(%q, %q) = false, want true", tmp, dev.DevPath)
 		}
 	})
@@ -242,14 +242,14 @@ func TestIsMounted(t *testing.T) {
 	// the old one. That is a stale mount to clear, not a mounted device.
 	t.Run("false when the mountpoint is held by a different, unplugged device node", func(t *testing.T) {
 		tmp := writeMounts(t, mounts)
-		if IsMounted(tmp, Device{Serial: "SN123", DevPath: "/dev/sdc1"}) {
+		if (Device{Serial: "SN123", DevPath: "/dev/sdc1", HostRoot: tmp}).IsMounted() {
 			t.Error("IsMounted = true for a mountpoint held by /dev/sdb1, want false")
 		}
 	})
 
 	t.Run("false when nothing is mounted at the canonical mountpoint", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n")
-		if IsMounted(tmp, Device{Serial: "SN123", DevPath: "/dev/sdb1"}) {
+		if (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}).IsMounted() {
 			t.Error("IsMounted = true, want false")
 		}
 	})

@@ -10,9 +10,9 @@ import (
 )
 
 func TestDesiredTopologyKeys(t *testing.T) {
-	devices := []mountedDevice{
-		{Device: devicescan.Device{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}},
-		{Device: devicescan.Device{Manufacturer: "Acme", Model: "USB Drive", Serial: "SN2"}},
+	devices := []devicescan.Device{
+		{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"},
+		{Manufacturer: "Acme", Model: "USB Drive", Serial: "SN2"},
 	}
 
 	got := desiredTopologyKeys("freeport.local", devices)
@@ -29,10 +29,10 @@ func TestDesiredTopologyKeys_noDevices(t *testing.T) {
 }
 
 func TestDesiredTopologyKeys_alwaysSorted(t *testing.T) {
-	devices := []mountedDevice{
-		{Device: devicescan.Device{Manufacturer: "Zebra", Model: "Drive", Serial: "SN1"}},
-		{Device: devicescan.Device{Manufacturer: "Acme", Model: "Drive", Serial: "SN2"}},
-		{Device: devicescan.Device{Manufacturer: "Mid", Model: "Drive", Serial: "SN3"}},
+	devices := []devicescan.Device{
+		{Manufacturer: "Zebra", Model: "Drive", Serial: "SN1"},
+		{Manufacturer: "Acme", Model: "Drive", Serial: "SN2"},
+		{Manufacturer: "Mid", Model: "Drive", Serial: "SN3"},
 	}
 	got := desiredTopologyKeys("freeport.local", devices)
 	want := []string{"freeport.local/acme-drive", "freeport.local/mid-drive", "freeport.local/zebra-drive"}

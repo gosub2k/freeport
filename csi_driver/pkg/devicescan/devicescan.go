@@ -1,15 +1,15 @@
-// Package devicescan provides read-only discovery of USB block devices, the
-// naming rules derived from them, and the shared answer to "is this device
-// mounted where we expect it?". It has no side effects — no mounting, no
-// formatting — so pkg/manager (which owns mounting) and pkg/driver (which only
-// consumes what the manager prepared) can agree on device state without one
-// depending on the other. That agreement matters: if the two disagree about
-// whether a device is ready, the manager labels the node while the driver
-// refuses to publish, and pods schedule somewhere they cannot mount.
+// Package devicescan owns USB block devices: discovering them via sysfs, the
+// naming rules derived from them, and (in mount.go) mounting them and
+// answering "is this device mounted where we expect it?".
+//
+// It is the one place both pkg/manager (which mounts devices) and pkg/driver
+// (which publishes what the manager prepared) get their answers from, so the
+// two cannot drift apart. That matters: when they disagree about whether a
+// device is ready, the manager labels the node while the driver refuses to
+// publish, and pods schedule somewhere they cannot mount.
 package devicescan
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,13 +22,19 @@ import (
 
 const Maxk8sLabelLength = 63
 
-// Device is a USB block device partition discovered via sysfs.
+// Device is a USB block device partition discovered via sysfs. It carries the
+// hostRoot it was discovered under so its mount methods need no extra context.
 type Device struct {
 	Manufacturer string
 	Model        string
 	Serial       string
 	Partition    int
 	DevPath      string // real device node, e.g. "/dev/sdb1"
+
+	// HostRoot is where the real host's filesystem is bind-mounted into this
+	// container, e.g. "/host". Paths this process resolves carry it as a
+	// prefix; paths the host's own PID 1 records never do.
+	HostRoot string
 }
 
 func (d Device) String() string {
@@ -37,6 +43,11 @@ func (d Device) String() string {
 		partition = "??"
 	}
 	return fmt.Sprintf("serial: %s, manufacturer: %q, type: usb, model: %q, partition: %s", d.Serial, d.Manufacturer, d.Model, partition)
+}
+
+// Label is the device's "<manufacturer>-<model>" topology name.
+func (d Device) Label() string {
+	return DeviceLabel(d.Manufacturer, d.Model)
 }
 
 // DeviceLabel builds the canonical "<manufacturer>-<model>" topology name
@@ -76,12 +87,6 @@ func DeviceLabel(manufacturer, model string) string {
 		d = strings.TrimRight(d, "-_.")
 	}
 	return m + sep + d
-}
-
-// Mountpoint returns the host-absolute mountpoint a device with the
-// given serial should be mounted at.
-func Mountpoint(serial string) string {
-	return fmt.Sprintf("/mnt/k8s-freeport-%s", serial)
 }
 
 // usbNodeFor walks sysfs up from the block device until it finds a directory
@@ -151,39 +156,49 @@ func Discover(hostRoot string) []Device {
 				Serial:       readSysAttr(filepath.Join(usbNode, "serial")),
 				Partition:    partition,
 				DevPath:      device,
+				HostRoot:     hostRoot,
 			})
 		}
 	}
 	return devs
 }
 
-// MountedAt parses hostRoot's /proc/1/mounts and reports which source device
-// is mounted at dev's canonical mountpoint, if anything is.
-func MountedAt(hostRoot string, dev Device) (source string, mounted bool) {
-	f, err := os.Open(filepath.Join(hostRoot, "/proc/1/mounts"))
-	if err != nil {
-		util.Log.Debug("cannot read mount table", "err", err)
-		return "", false
-	}
-	defer f.Close()
-
-	// Applied to both sides, so it doesn't matter which form either started in.
-	bare := func(p string) string { return strings.TrimPrefix(p, hostRoot) }
-	want := bare(Mountpoint(dev.Serial))
-
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		parts := strings.Fields(sc.Text())
-		if len(parts) >= 2 && bare(parts[1]) == want {
-			source, mounted = bare(parts[0]), true
+// DiscoverMounted returns only the discovered devices that are actually
+// mounted at their canonical mountpoint — the ones pkg/manager has finished
+// preparing, and so the only ones pkg/driver may publish.
+func DiscoverMounted(hostRoot string) []Device {
+	var out []Device
+	for _, d := range Discover(hostRoot) {
+		if d.IsMounted() {
+			out = append(out, d)
 		}
 	}
-	return source, mounted
+	return out
 }
 
-// IsMounted reports whether dev itself is currently mounted at its canonical
-// mountpoint.
-func IsMounted(hostRoot string, dev Device) bool {
-	source, mounted := MountedAt(hostRoot, dev)
-	return mounted && source == strings.TrimPrefix(dev.DevPath, hostRoot)
+// MatchVolumeContext returns the subset of devices satisfying every topology
+// segment in vc whose key starts with driverName+"/". Segments are expected in
+// the form "<driverName>/<manufacturer>-<model>=true"; keys belonging to any
+// other driver are ignored. A device carries exactly one label, so two
+// distinct driver-prefixed keys can never both match.
+func MatchVolumeContext(devices []Device, driverName string, vc map[string]string) []Device {
+	prefix := driverName + "/"
+	var matched []Device
+	for _, dev := range devices {
+		label := dev.Label()
+		ok := true
+		for k, v := range vc {
+			if !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			if k[len(prefix):] != label || v != "true" {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			matched = append(matched, dev)
+		}
+	}
+	return matched
 }

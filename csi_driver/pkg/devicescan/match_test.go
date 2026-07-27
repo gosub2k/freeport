@@ -1,12 +1,12 @@
-package driver
+package devicescan
 
 import "testing"
 
 func TestMatchVolumeContext(t *testing.T) {
 	// Two devices: one Acme USB Drive (SN123), one Generic Flash Drive (SN456).
-	devices := []hostBlockDevice{
-		{serial: "SN123", model: "USB Drive", manufacturer: "Acme", partition: 1},
-		{serial: "SN456", model: "Flash Drive", manufacturer: "Generic", partition: 1},
+	devices := []Device{
+		{Serial: "SN123", Model: "USB Drive", Manufacturer: "Acme", Partition: 1},
+		{Serial: "SN456", Model: "Flash Drive", Manufacturer: "Generic", Partition: 1},
 	}
 
 	tests := []struct {
@@ -20,13 +20,13 @@ func TestMatchVolumeContext(t *testing.T) {
 			wantSerials: []string{"SN123", "SN456"},
 		},
 		{
-			// devicescan.DeviceClassKey("Acme", "USB Drive") = "acme-usb-drive"
+			// DeviceLabel("Acme", "USB Drive") = "acme-usb-drive"
 			name:        "class key selects single device",
 			vc:          map[string]string{"freeport.io/acme-usb-drive": "true"},
 			wantSerials: []string{"SN123"},
 		},
 		{
-			// devicescan.DeviceClassKey("Generic", "Flash Drive") = "generic-flash-drive"
+			// DeviceLabel("Generic", "Flash Drive") = "generic-flash-drive"
 			name:        "different class key selects the other device",
 			vc:          map[string]string{"freeport.io/generic-flash-drive": "true"},
 			wantSerials: []string{"SN456"},
@@ -67,14 +67,14 @@ func TestMatchVolumeContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchVolumeContext(devices, "freeport.io", tt.vc)
+			got := MatchVolumeContext(devices, "freeport.io", tt.vc)
 			if len(got) != len(tt.wantSerials) {
 				t.Fatalf("got %d devices %v, want %d %v",
 					len(got), serialsOf(got), len(tt.wantSerials), tt.wantSerials)
 			}
 			for i, d := range got {
-				if d.serial != tt.wantSerials[i] {
-					t.Errorf("got[%d].serial = %q, want %q", i, d.serial, tt.wantSerials[i])
+				if d.Serial != tt.wantSerials[i] {
+					t.Errorf("got[%d].serial = %q, want %q", i, d.Serial, tt.wantSerials[i])
 				}
 			}
 		})
@@ -82,10 +82,10 @@ func TestMatchVolumeContext(t *testing.T) {
 }
 
 // serialsOf extracts serial fields for readable failure messages.
-func serialsOf(devs []hostBlockDevice) []string {
+func serialsOf(devs []Device) []string {
 	out := make([]string, len(devs))
 	for i, d := range devs {
-		out[i] = d.serial
+		out[i] = d.Serial
 	}
 	return out
 }

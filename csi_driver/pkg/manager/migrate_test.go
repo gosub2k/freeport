@@ -187,9 +187,6 @@ func TestMigrateStaleVolumes_happyPath(t *testing.T) {
 	clientset := fake.NewSimpleClientset(pv, &pod)
 	m := &Manager{clientset: clientset, nodeName: "node-b", driverName: "freeport.local"}
 
-	dev := mountedDevice{}
-	dev.mountpoint = "/mnt/dev1"
-
 	pvsByHandle, err := m.listPVsByVolumeHandle(context.Background())
 	if err != nil {
 		t.Fatalf("listPVsByVolumeHandle = %v", err)
