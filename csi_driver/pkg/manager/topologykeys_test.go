@@ -6,11 +6,11 @@ import (
 
 	storagev1 "k8s.io/api/storage/v1"
 
-	"freeport/pkg/devicescan"
+	"freeport/pkg/device"
 )
 
 func TestDesiredTopologyKeys(t *testing.T) {
-	devices := []devicescan.Device{
+	devices := []device.Device{
 		{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"},
 		{Manufacturer: "Acme", Model: "USB Drive", Serial: "SN2"},
 	}
@@ -29,7 +29,7 @@ func TestDesiredTopologyKeys_noDevices(t *testing.T) {
 }
 
 func TestDesiredTopologyKeys_alwaysSorted(t *testing.T) {
-	devices := []devicescan.Device{
+	devices := []device.Device{
 		{Manufacturer: "Zebra", Model: "Drive", Serial: "SN1"},
 		{Manufacturer: "Acme", Model: "Drive", Serial: "SN2"},
 		{Manufacturer: "Mid", Model: "Drive", Serial: "SN3"},

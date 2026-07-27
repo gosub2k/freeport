@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"freeport/pkg/devicescan"
+	"freeport/pkg/device"
 	"freeport/pkg/util"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,7 +34,7 @@ import (
 /////////////////////
 
 // deviceDelta returns the devices added and removed.
-func deviceDelta(prev, current map[string]devicescan.Device) (added, removed []devicescan.Device) {
+func deviceDelta(prev, current map[string]device.Device) (added, removed []device.Device) {
 	for serial, d := range current {
 		if _, ok := prev[serial]; !ok {
 			added = append(added, d)
@@ -49,10 +49,10 @@ func deviceDelta(prev, current map[string]devicescan.Device) (added, removed []d
 }
 
 // desiredLabels returns the full set of device labels this Node should carry
-func desiredLabels(driverName string, devices []devicescan.Device) map[string]string {
+func desiredLabels(driverName string, devices []device.Device) map[string]string {
 	labels := map[string]string{}
 	for _, d := range devices {
-		key := driverName + "/" + devicescan.DeviceLabel(d.Manufacturer, d.Model)
+		key := driverName + "/" + d.Label()
 		labels[key] = "true"
 	}
 	return labels
@@ -90,26 +90,21 @@ type Manager struct {
 
 	// lastSeen is the mounted-device set from the previous ReconcileOnce
 	// call, keyed by serial,.
-	lastSeen map[string]devicescan.Device
+	lastSeen map[string]device.Device
 
-	// mountFailures counts consecutive mount(8) failures per device serial,
-	// per manager instance, so ensureMounted can stop avoid failing identically forever.
-	mountFailures map[string]int
-
-	// mountFn is Device.Mount by default; swappable in tests.
-	mountFn func(dev devicescan.Device) string
+	// mounter mounts discovered devices and tracks their mount failures.
+	mounter *device.Mounter
 }
 
 // New returns a new Manager.
 func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) *Manager {
 	return &Manager{
-		clientset:     clientset,
-		nodeName:      nodeName,
-		hostRoot:      hostRoot,
-		driverName:    driverName,
-		lastSeen:      map[string]devicescan.Device{},
-		mountFailures: map[string]int{},
-		mountFn:       devicescan.Device.Mount,
+		clientset:  clientset,
+		nodeName:   nodeName,
+		hostRoot:   hostRoot,
+		driverName: driverName,
+		lastSeen:   map[string]device.Device{},
+		mounter:    device.NewMounter(),
 	}
 }
 
@@ -196,7 +191,7 @@ func (m *Manager) listPods(ctx context.Context, namespace string) ([]corev1.Pod,
 // for any that belong to a Bound, Retain-policy PV whose claim's pod is
 // running on a different node, deletes and recreates that PV pinned to this
 // node and deletes the pod so its controller can reschedule it here.
-func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []devicescan.Device) error {
+func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []device.Device) error {
 	if len(mounted) == 0 {
 		return nil
 	}
@@ -261,7 +256,7 @@ func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []devicescan.
 // syncTopologyKeys keeps this node's CSINode driver entry's topologyKeys in
 // sync with whichever devices are currently mounted. It recreates the CSINode
 // object because the TopologyKeys part is immutable.
-func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []devicescan.Device) error {
+func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []device.Device) error {
 	csiNode, err := m.clientset.StorageV1().CSINodes().Get(ctx, m.nodeName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -298,56 +293,16 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []devicescan.Dev
 	return err
 }
 
-// maxMountFailures caps how many times ensureMounted retries one device.
-const maxMountFailures = 3
-
-// ensureMounted makes sure every discovered device is mounted where it
-// belongs, and returns those that are. Failures are counted per device node so
-// a device that cannot be mounted is not retried forever.
-func (m *Manager) ensureMounted(discovered []devicescan.Device) []devicescan.Device {
-	seen := map[string]bool{}
-	var mounted []devicescan.Device
-	for _, d := range discovered {
-		seen[d.DevPath] = true
-		if d.IsMounted() {
-			mounted = append(mounted, d)
-			continue
-		}
-		if m.mountFailures[d.DevPath] >= maxMountFailures {
-			continue
-		}
-		// Not mounted, but the mountpoint may still be held by the node this
-		// device had before it was unplugged and replugged.
-		d.ClearStaleMount()
-		if m.mountFn(d) == "" {
-			m.mountFailures[d.DevPath]++
-			if m.mountFailures[d.DevPath] == maxMountFailures {
-				util.Log.Error("mount failed repeatedly, giving up until device is removed and reinserted",
-					"dev", d.DevPath, "failures", maxMountFailures)
-			}
-			continue
-		}
-		delete(m.mountFailures, d.DevPath)
-		mounted = append(mounted, d)
-	}
-	for devPath := range m.mountFailures {
-		if !seen[devPath] {
-			delete(m.mountFailures, devPath)
-		}
-	}
-	return mounted
-}
-
 // ReconcileOnce scans for devices, mounts any that aren't already mounted,
 // and patches this node's labels to reflect exactly the set of device
 // classes found.
 func (m *Manager) ReconcileOnce(ctx context.Context) error {
 
 	// Find eligible devices and make sure they are mounted.
-	discovered := devicescan.Discover(m.hostRoot)
-	mounted := m.ensureMounted(discovered)
+	discovered := device.Discover(m.hostRoot)
+	mounted := m.mounter.EnsureMounted(discovered)
 	// Log changes:
-	current := map[string]devicescan.Device{} // Serial -> devicescan.Device
+	current := map[string]device.Device{} // Serial -> device.Device
 	for _, d := range mounted {
 		current[d.Serial] = d
 	}

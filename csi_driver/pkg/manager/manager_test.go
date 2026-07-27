@@ -10,10 +10,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"freeport/pkg/devicescan"
+	"freeport/pkg/device"
 )
 
-func serials(devices []devicescan.Device) []string {
+func serials(devices []device.Device) []string {
 	if len(devices) == 0 {
 		return nil
 	}
@@ -26,44 +26,44 @@ func serials(devices []devicescan.Device) []string {
 }
 
 func TestDeviceDelta(t *testing.T) {
-	a := devicescan.Device{Serial: "A"}
-	b := devicescan.Device{Serial: "B"}
-	c := devicescan.Device{Serial: "C"}
+	a := device.Device{Serial: "A"}
+	b := device.Device{Serial: "B"}
+	c := device.Device{Serial: "C"}
 
 	tests := []struct {
 		name        string
-		prev, curr  map[string]devicescan.Device
+		prev, curr  map[string]device.Device
 		wantAdded   []string
 		wantRemoved []string
 	}{
 		{
 			name: "no change reports nothing",
-			prev: map[string]devicescan.Device{"A": a, "B": b},
-			curr: map[string]devicescan.Device{"A": a, "B": b},
+			prev: map[string]device.Device{"A": a, "B": b},
+			curr: map[string]device.Device{"A": a, "B": b},
 		},
 		{
 			name:      "new device is added",
-			prev:      map[string]devicescan.Device{"A": a},
-			curr:      map[string]devicescan.Device{"A": a, "B": b},
+			prev:      map[string]device.Device{"A": a},
+			curr:      map[string]device.Device{"A": a, "B": b},
 			wantAdded: []string{"B"},
 		},
 		{
 			name:        "unplugged device is removed",
-			prev:        map[string]devicescan.Device{"A": a, "B": b},
-			curr:        map[string]devicescan.Device{"A": a},
+			prev:        map[string]device.Device{"A": a, "B": b},
+			curr:        map[string]device.Device{"A": a},
 			wantRemoved: []string{"B"},
 		},
 		{
 			name:        "add and remove in the same tick",
-			prev:        map[string]devicescan.Device{"A": a, "B": b},
-			curr:        map[string]devicescan.Device{"A": a, "C": c},
+			prev:        map[string]device.Device{"A": a, "B": b},
+			curr:        map[string]device.Device{"A": a, "C": c},
 			wantAdded:   []string{"C"},
 			wantRemoved: []string{"B"},
 		},
 		{
 			name:      "first tick with no prior state reports everything as added",
-			prev:      map[string]devicescan.Device{},
-			curr:      map[string]devicescan.Device{"A": a, "B": b},
+			prev:      map[string]device.Device{},
+			curr:      map[string]device.Device{"A": a, "B": b},
 			wantAdded: []string{"A", "B"},
 		},
 	}
@@ -81,7 +81,7 @@ func TestDeviceDelta(t *testing.T) {
 }
 
 func TestDesiredLabels(t *testing.T) {
-	devices := []devicescan.Device{
+	devices := []device.Device{
 		{Manufacturer: "Acme", Model: "USB Drive", Serial: "SN123"},
 		{Manufacturer: "Generic", Model: "Flash Drive", Serial: "SN456"},
 	}
@@ -210,7 +210,7 @@ func TestSyncTopologyKeys_updatesStaleKeys(t *testing.T) {
 	clientset := fake.NewSimpleClientset(csiNode)
 	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
 
-	mounted := []devicescan.Device{{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}
+	mounted := []device.Device{{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}
 	if err := m.syncTopologyKeys(context.Background(), mounted); err != nil {
 		t.Fatalf("syncTopologyKeys = %v", err)
 	}
@@ -245,7 +245,7 @@ func TestSyncTopologyKeys_noopWhenAlreadyCurrent(t *testing.T) {
 	clientset := fake.NewSimpleClientset(csiNode)
 	m := &Manager{clientset: clientset, nodeName: "node-a", driverName: "freeport.local"}
 
-	mounted := []devicescan.Device{{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}
+	mounted := []device.Device{{Manufacturer: "SanDisk", Model: "Cruzer", Serial: "SN1"}}
 	if err := m.syncTopologyKeys(context.Background(), mounted); err != nil {
 		t.Fatalf("syncTopologyKeys = %v", err)
 	}

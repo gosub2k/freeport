@@ -1,19 +1,23 @@
-// Package devicescan owns USB block devices: discovering them via sysfs, the
-// naming rules derived from them, and (in mount.go) mounting them and
+// Package device owns USB block devices: discovering them via sysfs, the
+// naming rules derived from them, mounting them, and
 // answering "is this device mounted where we expect it?".
 //
 // It is the one place both pkg/manager (which mounts devices) and pkg/driver
 // (which publishes what the manager prepared) get their answers from, so the
 // two cannot drift apart.
-package devicescan
+package device
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"freeport/pkg/util"
 )
@@ -42,7 +46,7 @@ func (d Device) String() string {
 
 // Label is the device's "<manufacturer>-<model>" topology name.
 func (dv Device) Label() string {
-	model, manufacturer := dv.Manufacturer, dv.Model
+	manufacturer, model := dv.Manufacturer, dv.Model
 
 	// See https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
 	k8sLabel := func(s string) string {
@@ -84,7 +88,7 @@ const maxStaleUnmounts = 32
 
 // Mountpoint is where d belongs, as the host sees it.
 func (d Device) Mountpoint() string {
-	return fmt.Sprintf("/mnt/k8s-freeport-%s", serial)
+	return fmt.Sprintf("/mnt/k8s-freeport-%s", d.Serial)
 }
 
 // HostMountpoint is Mountpoint as this process sees it.
@@ -156,7 +160,7 @@ func (d Device) IsSwap() bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(blkidOutput) == "swap"
+	return strings.TrimSpace(string(out)) == "swap"
 }
 
 // Mount mounts d at its canonical mountpoint and returns that mountpoint, or
@@ -335,4 +339,62 @@ func MatchVolumeContext(devices []Device, driverName string, vc map[string]strin
 		}
 	}
 	return matched
+}
+
+// maxMountFailures caps how many times a Mounter retries one device node.
+const maxMountFailures = 3
+
+// Mounter mounts discovered devices, remembering per-device-node failures so a
+// device that cannot be mounted is not retried on every pass forever.
+type Mounter struct {
+	// failures counts consecutive mount(8) failures per device node. Keyed by
+	// node rather than serial because the partitions of one stick share a
+	// serial: keying by serial let a good partition's success clear its broken
+	// sibling's count every pass, so the cap never engaged.
+	failures map[string]int
+
+	// mountFn is Device.Mount by default; swappable in tests.
+	mountFn func(Device) string
+}
+
+func NewMounter() *Mounter {
+	return &Mounter{failures: map[string]int{}, mountFn: Device.Mount}
+}
+
+// EnsureMounted makes sure every discovered device is mounted where it
+// belongs, and returns those that are.
+func (mo *Mounter) EnsureMounted(discovered []Device) []Device {
+	seen := map[string]bool{}
+	var mounted []Device
+	for _, d := range discovered {
+		seen[d.DevPath] = true
+		if d.IsMounted() {
+			mounted = append(mounted, d)
+			continue
+		}
+		if mo.failures[d.DevPath] >= maxMountFailures {
+			continue
+		}
+		// Not mounted, but the mountpoint may still be held by the node this
+		// device had before it was unplugged and replugged.
+		d.ClearStaleMount()
+		if mo.mountFn(d) == "" {
+			mo.failures[d.DevPath]++
+			if mo.failures[d.DevPath] == maxMountFailures {
+				util.Log.Error("mount failed repeatedly, giving up until device is removed and reinserted",
+					"dev", d.DevPath, "failures", maxMountFailures)
+			}
+			continue
+		}
+		delete(mo.failures, d.DevPath)
+		mounted = append(mounted, d)
+	}
+	// Forget devices that are no longer present, so a reinserted device gets a
+	// fresh attempt budget.
+	for devPath := range mo.failures {
+		if !seen[devPath] {
+			delete(mo.failures, devPath)
+		}
+	}
+	return mounted
 }

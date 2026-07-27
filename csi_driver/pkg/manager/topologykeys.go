@@ -1,7 +1,7 @@
 package manager
 
 import (
-	"freeport/pkg/devicescan"
+	"freeport/pkg/device"
 	"sort"
 
 	storagev1 "k8s.io/api/storage/v1"
@@ -9,7 +9,7 @@ import (
 
 // desiredTopologyKeys returns the sorted set of topology keys this node's
 // CSINode driver entry should declare.
-func desiredTopologyKeys(driverName string, devices []devicescan.Device) []string {
+func desiredTopologyKeys(driverName string, devices []device.Device) []string {
 	labels := desiredLabels(driverName, devices)
 	keys := make([]string, 0, len(labels))
 	for k := range labels {

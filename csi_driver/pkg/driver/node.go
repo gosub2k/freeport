@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"freeport/pkg/devicescan"
+	"freeport/pkg/device"
 	"freeport/pkg/util"
 )
 
@@ -20,7 +20,7 @@ import (
 // WithNoScan replaces USB device scanning with a no-op. Use in tests.
 func WithNoScan() func(*NodeServer) {
 	return func(ns *NodeServer) {
-		ns.scanFn = func(string) []devicescan.Device { return nil }
+		ns.scanFn = func(string) []device.Device { return nil }
 	}
 }
 
@@ -29,8 +29,8 @@ func WithNoScan() func(*NodeServer) {
 // rather than the real host's. Use in tests.
 func WithFakeDevice(hostRoot string) func(*NodeServer) {
 	return func(ns *NodeServer) {
-		ns.scanFn = func(string) []devicescan.Device {
-			return []devicescan.Device{{
+		ns.scanFn = func(string) []device.Device {
+			return []device.Device{{
 				Serial:       "test-serial",
 				Manufacturer: "Test Co",
 				Model:        "Test USB",
@@ -57,7 +57,7 @@ type NodeServer struct {
 	hostRoot   string
 	nodeID     string
 	driverName string
-	scanFn     func(hostRoot string) []devicescan.Device
+	scanFn     func(hostRoot string) []device.Device
 	mountFn    func(source, target, fstype string, flags uintptr, data string) error
 }
 
@@ -67,7 +67,7 @@ func NewNodeServer(nodeID, hostRoot, driverName string, opts ...func(*NodeServer
 		nodeID:     nodeID,
 		hostRoot:   hostRoot,
 		driverName: driverName,
-		scanFn:     devicescan.DiscoverMounted,
+		scanFn:     device.DiscoverMounted,
 		mountFn:    syscall.Mount,
 	}
 	for _, opt := range opts {
@@ -95,7 +95,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	scanned := ns.scanFn(ns.hostRoot)
 	util.Log.Info("scanned devices", "total", len(scanned))
 
-	candidates := devicescan.MatchVolumeContext(scanned, ns.driverName, req.VolumeContext)
+	candidates := device.MatchVolumeContext(scanned, ns.driverName, req.VolumeContext)
 	if len(candidates) == 0 {
 		util.Log.Error("no matching block devices on node", "node", ns.nodeID)
 		return nil, status.Errorf(codes.ResourceExhausted, "no matching block devices on node %s", ns.nodeID)
