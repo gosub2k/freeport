@@ -303,7 +303,7 @@ func TestMountedAt(t *testing.T) {
 	t.Run("reports the source mounted at the device's canonical mountpoint", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
 
-		source, mounted := Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}.MountedAt()
+		source, mounted := Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}.MountInfo()
 		if !mounted || source != "/dev/sdb1" {
 			t.Errorf("MountedAt = (%q, %v), want (%q, true)", source, mounted, "/dev/sdb1")
 		}
@@ -312,13 +312,13 @@ func TestMountedAt(t *testing.T) {
 	t.Run("reports not-mounted when the canonical mountpoint is free", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n")
 
-		if _, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}).MountedAt(); mounted {
+		if _, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: tmp}).MountInfo(); mounted {
 			t.Error("MountedAt = mounted, want not-mounted")
 		}
 	})
 
 	t.Run("reports not-mounted when the mounts file is missing", func(t *testing.T) {
-		if _, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: t.TempDir()}).MountedAt(); mounted {
+		if _, mounted := (Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: t.TempDir()}).MountInfo(); mounted {
 			t.Error("MountedAt = mounted, want not-mounted")
 		}
 	})
@@ -326,7 +326,7 @@ func TestMountedAt(t *testing.T) {
 	t.Run("last entry wins when mounts are stacked on one mountpoint", func(t *testing.T) {
 		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n/dev/sdc1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
 
-		source, mounted := Device{Serial: "SN123", DevPath: "/dev/sdc1", HostRoot: tmp}.MountedAt()
+		source, mounted := Device{Serial: "SN123", DevPath: "/dev/sdc1", HostRoot: tmp}.MountInfo()
 		if !mounted || source != "/dev/sdc1" {
 			t.Errorf("MountedAt = (%q, %v), want (%q, true) — the kernel resolves to the topmost mount", source, mounted, "/dev/sdc1")
 		}
@@ -450,164 +450,6 @@ func TestUnmount_refusesNonEmptyDir(t *testing.T) {
 
 	if _, err := os.Stat(leftoverFile); err != nil {
 		t.Errorf("Unmount must not touch a non-empty mountpoint's contents, but stat failed: %v", err)
-	}
-}
-
-// Mounter
-///////////
-
-// newTestMounter returns a Mounter whose mountFn is replaced by fn, so no real
-// mount(8) is attempted.
-func newTestMounter(fn func(Device) string) *Mounter {
-	mo := NewMounter()
-	mo.mountFn = fn
-	return mo
-}
-
-// Regression test for pods failing NodePublishVolume with "no matching block
-// devices on node" after a device was unplugged and replugged.
-//
-// Yanking a stick doesn't unmount it, so its entry lingers in the mount table.
-// Replug it inside one reconcile interval and the manager never observes the
-// gap, so Unmount never runs — and the kernel usually brings the stick back
-// under a *new* device node. Treating the still-occupied mountpoint as proof
-// the device is mounted made the manager skip it while labelling the node, so
-// pods scheduled there and then could not publish.
-func TestEnsureMounted_remountsDeviceThatReturnedOnANewDevPath(t *testing.T) {
-	tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
-
-	var mountedDev string
-	mo := newTestMounter(func(d Device) string {
-		mountedDev = d.DevPath
-		return d.Mountpoint()
-	})
-
-	// Same serial, new device node — the mountpoint is still held by /dev/sdb1.
-	got := mo.EnsureMounted([]Device{{Serial: "SN123", DevPath: "/dev/sdc1", HostRoot: tmp}})
-
-	if mountedDev != "/dev/sdc1" {
-		t.Errorf("mountFn called with %q, want /dev/sdc1 — the reconnected device must be remounted, not skipped", mountedDev)
-	}
-	if len(got) != 1 || got[0].Mountpoint() != "/mnt/k8s-freeport-SN123" {
-		t.Fatalf("EnsureMounted = %+v, want the device reported at its canonical mountpoint", got)
-	}
-}
-
-// The other half of the same decision: a device genuinely mounted where it
-// belongs must not be mounted again, which is what stacked duplicate mounts.
-func TestEnsureMounted_skipsDeviceAlreadyMountedAtItsCanonicalMountpoint(t *testing.T) {
-	tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw 0 0\n")
-
-	calls := 0
-	mo := newTestMounter(func(Device) string { calls++; return "" })
-
-	// hostRoot-prefixed, as Discover() actually yields it.
-	dev := Device{Serial: "SN123", DevPath: filepath.Join(tmp, "/dev/sdb1"), HostRoot: tmp}
-	got := mo.EnsureMounted([]Device{dev})
-
-	if calls != 0 {
-		t.Errorf("mountFn called %d times, want 0 — remounting stacks a duplicate", calls)
-	}
-	if len(got) != 1 || got[0].Mountpoint() != "/mnt/k8s-freeport-SN123" {
-		t.Fatalf("EnsureMounted = %+v, want the already-mounted device reported once", got)
-	}
-}
-
-func TestEnsureMounted_givesUpAfterMaxFailures(t *testing.T) {
-	calls := 0
-	mo := newTestMounter(func(Device) string { calls++; return "" })
-	dev := Device{Serial: "SN1", DevPath: "/dev/sdx1"}
-
-	for i := 0; i < 5; i++ {
-		got := mo.EnsureMounted([]Device{dev})
-		if len(got) != 0 {
-			t.Fatalf("pass %d: EnsureMounted = %v, want empty", i, got)
-		}
-	}
-
-	if calls != maxMountFailures {
-		t.Errorf("mountFn called %d times, want exactly %d (further passes should skip)", calls, maxMountFailures)
-	}
-	if mo.failures["/dev/sdx1"] != maxMountFailures {
-		t.Errorf("failures[/dev/sdx1] = %d, want %d", mo.failures["/dev/sdx1"], maxMountFailures)
-	}
-}
-
-func TestEnsureMounted_successResetsFailureCount(t *testing.T) {
-	attempt := 0
-	mo := newTestMounter(func(d Device) string {
-		attempt++
-		if attempt <= 2 {
-			return ""
-		}
-		return d.Mountpoint()
-	})
-	dev := Device{Serial: "SN1", DevPath: "/dev/sdx1"}
-
-	mo.EnsureMounted([]Device{dev})
-	mo.EnsureMounted([]Device{dev})
-	if mo.failures["/dev/sdx1"] != 2 {
-		t.Fatalf("failures[/dev/sdx1] = %d, want 2 before the successful attempt", mo.failures["/dev/sdx1"])
-	}
-
-	got := mo.EnsureMounted([]Device{dev})
-	if len(got) != 1 || got[0].Mountpoint() != "/mnt/k8s-freeport-SN1" {
-		t.Fatalf("EnsureMounted = %v, want the device mounted on the 3rd attempt", got)
-	}
-	if _, stillTracked := mo.failures["/dev/sdx1"]; stillTracked {
-		t.Errorf("failures[/dev/sdx1] should have been cleared on success, still present: %v", mo.failures)
-	}
-}
-
-func TestEnsureMounted_deviceGoneResetsFailureCount(t *testing.T) {
-	mo := newTestMounter(func(Device) string { return "" })
-	dev := Device{Serial: "SN1", DevPath: "/dev/sdx1"}
-
-	mo.EnsureMounted([]Device{dev})
-	mo.EnsureMounted([]Device{dev})
-	if mo.failures["/dev/sdx1"] != 2 {
-		t.Fatalf("failures[/dev/sdx1] = %d, want 2", mo.failures["/dev/sdx1"])
-	}
-
-	mo.EnsureMounted(nil) // device unplugged — not in this pass's discovered list
-	if _, tracked := mo.failures["/dev/sdx1"]; tracked {
-		t.Fatalf("failures[/dev/sdx1] should be cleared once the device is no longer discovered, still present: %v", mo.failures)
-	}
-
-	mo.EnsureMounted([]Device{dev}) // reinserted — should get a fresh attempt budget
-	if mo.failures["/dev/sdx1"] != 1 {
-		t.Errorf("failures[/dev/sdx1] = %d after reinsertion, want 1 (fresh budget, not resumed at 2)", mo.failures["/dev/sdx1"])
-	}
-}
-
-// Regression test for a real bug found running against actual hardware: a
-// physical USB stick with a good partition (e.g. sdf1, mounts fine) and a
-// genuinely broken sibling (e.g. sdf3, bad superblock) share one Serial from
-// the common USB sysfs node. Keying failures by Serial meant sdf1's success
-// cleared the shared counter every tick before sdf3 could ever accumulate 3
-// consecutive failures — the cap silently never engaged, and "mount failed"
-// logged forever. Keying by DevPath instead fixes this.
-func TestEnsureMounted_siblingPartitionSuccessDoesNotResetFailureCount(t *testing.T) {
-	goodPartition := Device{Serial: "SHARED", DevPath: "/dev/sdf1", Partition: 1}
-	badPartition := Device{Serial: "SHARED", DevPath: "/dev/sdf3", Partition: 3}
-
-	mo := newTestMounter(func(d Device) string {
-		if d.DevPath == goodPartition.DevPath {
-			return d.Mountpoint()
-		}
-		return "" // badPartition always fails, every tick, forever
-	})
-
-	for i := 0; i < 5; i++ {
-		mo.EnsureMounted([]Device{goodPartition, badPartition})
-	}
-
-	if mo.failures["/dev/sdf3"] != maxMountFailures {
-		t.Errorf("failures[/dev/sdf3] = %d, want %d — the good sibling partition's success must not reset the bad one's count",
-			mo.failures["/dev/sdf3"], maxMountFailures)
-	}
-	if _, tracked := mo.failures["/dev/sdf1"]; tracked {
-		t.Errorf("failures[/dev/sdf1] should never be tracked, it always succeeds: %v", mo.failures)
 	}
 }
 

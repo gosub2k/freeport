@@ -92,19 +92,18 @@ type Manager struct {
 	// call, keyed by serial,.
 	lastSeen map[string]device.Device
 
-	// mounter mounts discovered devices and tracks their mount failures.
-	mounter *device.Mounter
+	failedMounts map[string]bool
 }
 
 // New returns a new Manager.
 func New(clientset kubernetes.Interface, nodeName, hostRoot, driverName string) *Manager {
 	return &Manager{
-		clientset:  clientset,
-		nodeName:   nodeName,
-		hostRoot:   hostRoot,
-		driverName: driverName,
-		lastSeen:   map[string]device.Device{},
-		mounter:    device.NewMounter(),
+		clientset:    clientset,
+		nodeName:     nodeName,
+		hostRoot:     hostRoot,
+		driverName:   driverName,
+		lastSeen:     map[string]device.Device{},
+		failedMounts: map[string]bool{},
 	}
 }
 
@@ -300,7 +299,17 @@ func (m *Manager) ReconcileOnce(ctx context.Context) error {
 
 	// Find eligible devices and make sure they are mounted.
 	discovered := device.Discover(m.hostRoot)
-	mounted := m.mounter.EnsureMounted(discovered)
+	var mounted []device.Device
+	for _, d := range discovered {
+		if m.failedMounts[d.Serial] == true {
+			continue
+		}
+		if d.EnsureMounted() {
+			mounted = append(mounted, d)
+		} else {
+			m.failedMounts[d.Serial] = true
+		}
+	}
 	// Log changes:
 	current := map[string]device.Device{} // Serial -> device.Device
 	for _, d := range mounted {

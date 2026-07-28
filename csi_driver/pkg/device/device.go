@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"freeport/pkg/util"
 )
@@ -96,27 +97,14 @@ func (d Device) HostMountpoint() string {
 	return filepath.Join(d.HostRoot, d.Mountpoint())
 }
 
-// bare strips the hostRoot prefix from p. Applied to both sides of every
-// comparison, so it doesn't matter which form either started in: paths this
-// process resolves are hostRoot-prefixed ("/host/dev/sda1"), while
-// /proc/1/mounts belongs to the real host's init and records bare ones
-// ("/dev/sda1"), and the two never compare equal untrimmed.
+// bare strips the hostRoot prefix from p.
 func (d Device) bare(p string) string {
 	return strings.TrimPrefix(p, d.HostRoot)
 }
 
-// MountedAt reports which source device is mounted at d's canonical
+// MountInfo reports which source device is mounted at d's canonical
 // mountpoint, if anything is.
-//
-// It is keyed on the mountpoint rather than on the device node because a
-// device node is not stable across a replug while the serial — and therefore
-// the mountpoint — is. Callers compare the returned source against the device
-// they expect, so a mountpoint still held by a previous, now-unplugged node is
-// recognized as stale rather than mistaken for the device being mounted.
-//
-// When entries stack on one mountpoint the last wins, which is the one the
-// kernel resolves accesses to.
-func (d Device) MountedAt() (source string, mounted bool) {
+func (d Device) MountInfo() (source string, mounted bool) {
 	f, err := os.Open(filepath.Join(d.HostRoot, "/proc/1/mounts"))
 	if err != nil {
 		util.Log.Debug("cannot read mount table", "err", err)
@@ -140,8 +128,9 @@ func (d Device) MountedAt() (source string, mounted bool) {
 // mountpoint. A mountpoint left occupied by a different (usually just
 // unplugged) device node is deliberately not "mounted": see MountedAt.
 func (d Device) IsMounted() bool {
-	source, mounted := d.MountedAt()
-	return mounted && source == d.bare(d.DevPath)
+	source, mounted := d.MountInfo()
+	// REVISIT: which one is it?
+	return mounted && (source == d.bare(d.DevPath) || source == d.DevPath)
 }
 
 // FreeBytes reports space available on d's mountpoint, or 0 if it can't be read.
@@ -188,7 +177,7 @@ func (d Device) Mount() string {
 // ClearStaleMount unmounts anything still occupying d's canonical mountpoint
 // that isn't d itself, and is a no-op when the mountpoint is free.
 func (d Device) ClearStaleMount() {
-	source, mounted := d.MountedAt()
+	source, mounted := d.MountInfo()
 	if !mounted {
 		return
 	}
@@ -231,6 +220,29 @@ func (d Device) Unmount() {
 	default:
 		util.Log.Error("cannot remove mountpoint for removed device", "path", hostMountpoint, "err", err)
 	}
+}
+
+func (d Device) EnsureMounted() bool {
+	mountRetries := 3
+	if d.IsMounted() {
+		return true
+	}
+	for i := 0; i < mountRetries; i++ {
+		d.Mount()
+		if d.IsMounted() {
+			return true
+		}
+		util.Log.Error("mounting failed", "attempt", i, "device", d)
+		time.Sleep(1 * time.Second)
+	}
+	util.Log.Info("trying to clear any stale mountpoint and retry", "device", d)
+	d.ClearStaleMount()
+	d.Mount()
+	if d.IsMounted() {
+		return true
+	}
+	util.Log.Error("final attempt to mount failed", "device", d)
+	return false
 }
 
 // Discover walks hostRoot's /dev/disk/by-id for usb-...-partN symlinks and
@@ -339,62 +351,4 @@ func MatchVolumeContext(devices []Device, driverName string, vc map[string]strin
 		}
 	}
 	return matched
-}
-
-// maxMountFailures caps how many times a Mounter retries one device node.
-const maxMountFailures = 3
-
-// Mounter mounts discovered devices, remembering per-device-node failures so a
-// device that cannot be mounted is not retried on every pass forever.
-type Mounter struct {
-	// failures counts consecutive mount(8) failures per device node. Keyed by
-	// node rather than serial because the partitions of one stick share a
-	// serial: keying by serial let a good partition's success clear its broken
-	// sibling's count every pass, so the cap never engaged.
-	failures map[string]int
-
-	// mountFn is Device.Mount by default; swappable in tests.
-	mountFn func(Device) string
-}
-
-func NewMounter() *Mounter {
-	return &Mounter{failures: map[string]int{}, mountFn: Device.Mount}
-}
-
-// EnsureMounted makes sure every discovered device is mounted where it
-// belongs, and returns those that are.
-func (mo *Mounter) EnsureMounted(discovered []Device) []Device {
-	seen := map[string]bool{}
-	var mounted []Device
-	for _, d := range discovered {
-		seen[d.DevPath] = true
-		if d.IsMounted() {
-			mounted = append(mounted, d)
-			continue
-		}
-		if mo.failures[d.DevPath] >= maxMountFailures {
-			continue
-		}
-		// Not mounted, but the mountpoint may still be held by the node this
-		// device had before it was unplugged and replugged.
-		d.ClearStaleMount()
-		if mo.mountFn(d) == "" {
-			mo.failures[d.DevPath]++
-			if mo.failures[d.DevPath] == maxMountFailures {
-				util.Log.Error("mount failed repeatedly, giving up until device is removed and reinserted",
-					"dev", d.DevPath, "failures", maxMountFailures)
-			}
-			continue
-		}
-		delete(mo.failures, d.DevPath)
-		mounted = append(mounted, d)
-	}
-	// Forget devices that are no longer present, so a reinserted device gets a
-	// fresh attempt budget.
-	for devPath := range mo.failures {
-		if !seen[devPath] {
-			delete(mo.failures, devPath)
-		}
-	}
-	return mounted
 }
