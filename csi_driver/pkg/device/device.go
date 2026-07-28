@@ -9,6 +9,7 @@ package device
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -152,6 +153,90 @@ func (d Device) IsSwap() bool {
 	return strings.TrimSpace(string(out)) == "swap"
 }
 
+/*
+	switch fstype {
+	case "ext2", "ext3", "ext4":
+		// -y: assume yes to all questions, -f: force check even if clean
+		return "e2fsck", []string{"-y", "-f", device}, true
+	case "vfat":
+		// dosfsck/fsck.vfat: -a = auto-repair non-interactively, -w = write immediately
+		return "fsck.vfat", []string{"-a", "-w", device}, true
+	case "ntfs", "ntfs-3g":
+		// ntfsfix clears the dirty flag and fixes some common problems;
+		// it's not a full fsck but it's the standard non-interactive tool
+		return "ntfsfix", []string{device}, true
+	case "xfs":
+		// fsck.xfs is a no-op stub by design; use xfs_repair directly
+		return "xfs_repair", []string{device}, true
+	case "btrfs":
+		// btrfs check --repair is the closest analog; still requires unmounted fs
+		return "btrfs", []string{"check", "--repair", device}, true
+	case "exfat":
+		return "fsck.exfat", []string{"-y", device}, true
+	case "jfs":
+		return "fsck.jfs", []string{"-y", device}, true
+	case "reiserfs":
+		return "reiserfsck", []string{"-y", "--fix-fixable", device}, true
+	default:
+		return "", nil, false
+
+*/
+
+func runCmd(com ...string) (error, string, string) {
+	var stdout, stderr bytes.Buffer
+
+	cmd := exec.Command(com[0], com[1:]...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+}
+
+// MaybeRepair tries to fix a filesystem to prevent mounting read-only.
+// Read-only mount could occur if a usb device was removed before syncing fs.
+// Its intentionally aggressive, an option to control this could be added later.
+func (d Device) MaybeRepair() {
+
+	// Check filesystem
+	util.Log.Info("CHECK filesystem")
+	err, _, _ := runCmd("fsck", "-n", d.DevPath)
+	if err == nil {
+		return
+	}
+
+	// attempt fix
+	var fixCmd []string
+
+	// Get fstype
+	// err, fstype, _ := runCmd("blkid", "-o", "value", "-s", "TYPE", d.DevPath)
+	// if err == nil {
+	// 	fstype = strings.TrimSpace(string(fstype))
+	// 	if fstype != "" {
+	// 		fstype = strings.ToLower(strings.TrimSpace(fstype))
+	// 		switch fstype {
+	// 		case "vfat", "fat", "fat12", "fat16", "fat32", "msdos":
+	// 			fixCmd = []string{"fsck",}
+	// 		case "ext2", "ext3", "ext4":
+	// 			fallthrough
+	// 		default:
+	// 			break
+	// 		}
+	// 	}
+	// } else {
+	// 	util.Log.Error("blkid failed", "err", err)
+	// }
+	//
+	fixCmd = []string{"fsck", "-y", d.DevPath}
+
+	util.Log.Info("fsck", "command", fixCmd)
+	err, stdout, stderr := runCmd(fixCmd...)
+	util.Log.Info("fsck", "stdout", stdout)
+	util.Log.Info("fsck", "stderr", stderr)
+	if err != nil {
+		util.Log.Error("Error checking filesystem:", "err", err)
+	}
+
+}
+
 // Mount mounts d at its canonical mountpoint and returns that mountpoint, or
 // "" on failure.
 func (d Device) Mount() string {
@@ -165,12 +250,21 @@ func (d Device) Mount() string {
 		return ""
 	}
 
+	d.MaybeRepair()
+
 	// REVISIT: consider mounting with -o sync to reduce chance of dirty filesystem if media removed.
-	if out, err := exec.Command("mount" /* "-o", "sync", */, d.DevPath, d.HostMountpoint()).CombinedOutput(); err != nil {
-		util.Log.Error("mount failed", "dev", d.DevPath, "mp", d.HostMountpoint(), "err", err, "output", strings.TrimSpace(string(out)))
+	err, stdout, stderr := runCmd("mount" /* "-o", "sync", */, d.DevPath, d.HostMountpoint())
+
+	if err != nil {
+		util.Log.Error("mount failed", "dev", d.DevPath, "mp", d.HostMountpoint(), "err", err)
+		util.Log.Error(fmt.Sprintf("stdout: %s", stdout))
+		util.Log.Error(fmt.Sprintf("stderr: %s", stderr))
 		return ""
 	}
+
 	util.Log.Info("MOUNTED", "dev", d.DevPath, "mp", d.Mountpoint())
+	util.Log.Error(fmt.Sprintf("stdout: %s", stdout))
+	util.Log.Error(fmt.Sprintf("stderr: %s", stderr))
 	return d.Mountpoint()
 }
 
@@ -241,7 +335,7 @@ func (d Device) EnsureMounted() bool {
 	if d.IsMounted() {
 		return true
 	}
-	util.Log.Error("final attempt to mount failed", "device", d)
+	util.Log.Error("** final attempt to mount failed **", "device", d)
 	return false
 }
 

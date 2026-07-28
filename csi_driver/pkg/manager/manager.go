@@ -304,8 +304,12 @@ func (m *Manager) ReconcileOnce(ctx context.Context) error {
 		if m.failedMounts[d.Serial] == true {
 			continue
 		}
+		// wasMounted := d.IsMounted()
 		if d.EnsureMounted() {
 			mounted = append(mounted, d)
+			if _, found := m.lastSeen[d.Serial]; !found {
+				util.Log.Info("MOUNTED", "device", d) // Show on first pass
+			}
 		} else {
 			m.failedMounts[d.Serial] = true
 		}
