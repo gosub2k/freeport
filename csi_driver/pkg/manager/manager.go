@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 )
 
 // Utility functions:
@@ -259,10 +260,12 @@ func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []device.Devi
 }
 
 // syncTopologyKeys keeps this node's CSINode driver entry's topologyKeys in
-// sync with whichever devices are currently mounted. It recreates the CSINode
-// object because the TopologyKeys part is immutable.
+// sync with whichever devices are currently mounted. It removes and re-adds the
+// driver entry because the TopologyKeys of an existing one are immutable.
 func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []device.Device) error {
-	csiNode, err := m.clientset.StorageV1().CSINodes().Get(ctx, m.nodeName, metav1.GetOptions{})
+	csiNodes := m.clientset.StorageV1().CSINodes()
+
+	csiNode, err := csiNodes.Get(ctx, m.nodeName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil // node-driver-registrar hasn't registered this node yet
@@ -280,22 +283,50 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []device.Device)
 		return nil
 	}
 
-	newCSINode := csiNode.DeepCopy()
-	newCSINode.Spec.Drivers[idx].TopologyKeys = desired
-	newCSINode.ResourceVersion = ""
-	newCSINode.UID = ""
-	newCSINode.CreationTimestamp = metav1.Time{}
-	newCSINode.ManagedFields = nil
-	newCSINode.Finalizers = nil
-	newCSINode.Generation = 0
+	// TopologyKeys on an *existing* driver entry is immutable, but adding and
+	// removing whole entries is not — update validation only compares entries
+	// present both before and after. So drop our entry and re-add it, rather
+	// than deleting the CSINode object: that object carries every CSI driver's
+	// registration on this node, so recreating it puts all of them at risk to
+	// change one field of ours. This also needs only the "update" verb.
+	entry := *csiNode.Spec.Drivers[idx].DeepCopy()
+	entry.TopologyKeys = desired
 
-	csiNodes := m.clientset.StorageV1().CSINodes()
-	if err := csiNodes.Delete(ctx, m.nodeName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("deleting CSINode %s: %w", m.nodeName, err)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := csiNodes.Get(ctx, m.nodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		i := driverIndex(cur.Spec.Drivers, m.driverName)
+		if i == -1 {
+			return nil // already absent
+		}
+		cur.Spec.Drivers = append(cur.Spec.Drivers[:i], cur.Spec.Drivers[i+1:]...)
+		_, err = csiNodes.Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	}); err != nil {
+		return fmt.Errorf("removing driver entry from CSINode %s: %w", m.nodeName, err)
 	}
-	util.Log.Info("recreating CSINode with updated topology keys", "keys", desired)
-	_, err = csiNodes.Create(ctx, newCSINode, metav1.CreateOptions{})
-	return err
+
+	util.Log.Info("re-adding CSINode driver entry with updated topology keys", "keys", desired)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := csiNodes.Get(ctx, m.nodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if driverIndex(cur.Spec.Drivers, m.driverName) != -1 {
+			return nil // something re-registered it already
+		}
+		cur.Spec.Drivers = append(cur.Spec.Drivers, entry)
+		_, err = csiNodes.Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	}); err != nil {
+		// The entry is removed but not restored, so this node advertises no
+		// freeport driver at all until it is put back. The next tick returns
+		// early on idx == -1, so recovery needs the registrar to run again.
+		return fmt.Errorf("re-adding driver entry to CSINode %s, entry now missing: %w", m.nodeName, err)
+	}
+	return nil
 }
 
 // ReconcileOnce scans for devices, mounts any that aren't already mounted,
