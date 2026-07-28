@@ -9,3 +9,4 @@ TEST.sh
 START_TILT*
 test/manual/cleanup-pod.sh
 test/chainsaw/values.yaml
+DEBUG.sh
