@@ -6,11 +6,11 @@ metadata:
 spec:
   selector:
     matchLabels:
-      name: freeport-manager
+      app: freeport-manager
   template:
     metadata:
       labels:
-        name: freeport-manager
+        app: freeport-manager
     spec:
       serviceAccountName: freeport-manager
       tolerations:
