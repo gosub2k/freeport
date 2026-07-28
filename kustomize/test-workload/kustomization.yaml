@@ -1,0 +1,15 @@
+# The narrow test workload, kept out of the base/overlay deploy on purpose.
+#
+# With Tilt:
+#   DEPLOY_TEST_WORKLOAD=1 tilt up --file Tiltfile.tilt
+#
+# Manually, without Tilt:
+#   kubectl apply -k kustomize/test-workload
+#   kubectl delete -k kustomize/test-workload
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: freeport-test
+
+resources:
+  - namespace.yaml
+  - deployment-narrow.yaml
