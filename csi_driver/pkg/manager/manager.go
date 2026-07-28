@@ -132,16 +132,19 @@ func (m *Manager) recreatePVForNode(ctx context.Context, pv *corev1.PersistentVo
 	if err != nil {
 		return nil, fmt.Errorf("re-fetching PV %s before finalizer strip: %w", pv.Name, err)
 	}
-	var kept []string
-	for _, f := range fresh.Finalizers {
-		if f != pvProtectionFinalizer {
-			kept = append(kept, f)
-		}
+	// Strip every finalizer, not just pv-protection: any one left behind parks
+	// the object in Terminating instead of deleting it, and the Create below
+	// would then fail AlreadyExists having already marked the PV for deletion.
+	// With none left the delete completes before the API call returns, so no
+	// waiting is needed. Safe because migration only runs on Retain PVs
+	// (isOkToMigrate), so removing the object never touches the data.
+	if len(fresh.Finalizers) > 0 {
+		util.Log.Info("stripping finalizers before recreating PV", "pv", pv.Name, "finalizers", fresh.Finalizers)
 	}
-	fresh.Finalizers = kept
+	fresh.Finalizers = nil
 	fresh, err = pvs.Update(ctx, fresh, metav1.UpdateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("stripping finalizer on PV %s: %w", pv.Name, err)
+		return nil, fmt.Errorf("stripping finalizers on PV %s: %w", pv.Name, err)
 	}
 
 	newPV := fresh.DeepCopy()
@@ -154,7 +157,10 @@ func (m *Manager) recreatePVForNode(ctx context.Context, pv *corev1.PersistentVo
 	newPV.Status = corev1.PersistentVolumeStatus{}
 	pinNodeAffinity(newPV, m.nodeName)
 
-	if err := pvs.Delete(ctx, pv.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	// UID precondition: only delete the object we just inspected, never a
+	// same-named PV that something else recreated in the meantime.
+	del := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &fresh.UID}}
+	if err := pvs.Delete(ctx, pv.Name, del); err != nil && !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("deleting PV %s: %w", pv.Name, err)
 	}
 	created, err := pvs.Create(ctx, newPV, metav1.CreateOptions{})
