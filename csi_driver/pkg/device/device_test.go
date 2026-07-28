@@ -534,3 +534,47 @@ func TestMatchVolumeContext(t *testing.T) {
 		})
 	}
 }
+
+func TestIsReadOnly(t *testing.T) {
+	dev := func(root string) Device {
+		return Device{Serial: "SN123", DevPath: "/dev/sdb1", HostRoot: root}
+	}
+
+	t.Run("true when the mount options start with ro", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat ro,relatime 0 0\n")
+		if !dev(tmp).IsReadOnly() {
+			t.Error("IsReadOnly = false, want true")
+		}
+	})
+
+	t.Run("true when ro appears later in the option list", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat relatime,ro 0 0\n")
+		if !dev(tmp).IsReadOnly() {
+			t.Error("IsReadOnly = false, want true")
+		}
+	})
+
+	t.Run("false when mounted read-write", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 vfat rw,relatime 0 0\n")
+		if dev(tmp).IsReadOnly() {
+			t.Error("IsReadOnly = true, want false")
+		}
+	})
+
+	// "rw" contains no "ro", but options like "errors=remount-ro" do — matching
+	// on substring rather than on a whole comma-separated option would report a
+	// writable device as read-only and send it round the repair path forever.
+	t.Run("false for options that merely contain the letters ro", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sdb1 /mnt/k8s-freeport-SN123 ext4 rw,errors=remount-ro 0 0\n")
+		if dev(tmp).IsReadOnly() {
+			t.Error("IsReadOnly = true for rw,errors=remount-ro, want false")
+		}
+	})
+
+	t.Run("false when not mounted at all", func(t *testing.T) {
+		tmp := writeMounts(t, "/dev/sda1 / ext4 rw 0 0\n")
+		if dev(tmp).IsReadOnly() {
+			t.Error("IsReadOnly = true, want false")
+		}
+	})
+}
