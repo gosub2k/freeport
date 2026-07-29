@@ -129,26 +129,23 @@ func (m *Manager) listPVsByVolumeHandle(ctx context.Context) (map[string]*corev1
 func (m *Manager) recreatePVForNode(ctx context.Context, pv *corev1.PersistentVolume) (*corev1.PersistentVolume, error) {
 	pvs := m.clientset.CoreV1().PersistentVolumes()
 
-	fresh, err := pvs.Get(ctx, pv.Name, metav1.GetOptions{})
+	prevPV, err := pvs.Get(ctx, pv.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("re-fetching PV %s before finalizer strip: %w", pv.Name, err)
 	}
-	// Strip every finalizer, not just pv-protection: any one left behind parks
-	// the object in Terminating instead of deleting it, and the Create below
-	// would then fail AlreadyExists having already marked the PV for deletion.
-	// With none left the delete completes before the API call returns, so no
-	// waiting is needed. Safe because migration only runs on Retain PVs
-	// (isOkToMigrate), so removing the object never touches the data.
-	if len(fresh.Finalizers) > 0 {
-		util.Log.Info("stripping finalizers before recreating PV", "pv", pv.Name, "finalizers", fresh.Finalizers)
+	// Strip every finalizer, Claude says "safe"
+	// REVISIT: is this necessary? can PV be recreated if prev is still deleting?
+	// REVISIT: just strip the standard finalizer "kubernetes.io/pv-protection"
+	if len(prevPV.Finalizers) > 0 {
+		util.Log.Info("stripping finalizers before recreating PV", "pv", pv.Name, "finalizers", prevPV.Finalizers)
 	}
-	fresh.Finalizers = nil
-	fresh, err = pvs.Update(ctx, fresh, metav1.UpdateOptions{})
+	prevPV.Finalizers = nil
+	prevPV, err = pvs.Update(ctx, prevPV, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("stripping finalizers on PV %s: %w", pv.Name, err)
 	}
 
-	newPV := fresh.DeepCopy()
+	newPV := prevPV.DeepCopy()
 	newPV.ResourceVersion = ""
 	newPV.UID = ""
 	newPV.CreationTimestamp = metav1.Time{}
@@ -158,12 +155,13 @@ func (m *Manager) recreatePVForNode(ctx context.Context, pv *corev1.PersistentVo
 	newPV.Status = corev1.PersistentVolumeStatus{}
 	pinNodeAffinity(newPV, m.nodeName)
 
-	// UID precondition: only delete the object we just inspected, never a
-	// same-named PV that something else recreated in the meantime.
-	del := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &fresh.UID}}
+	// REVISIT: use retry - if the resouce was awaiting deletion or otherwise handle
+	// UID precondition: avoid some kind of race edge case.
+	del := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &prevPV.UID}}
 	if err := pvs.Delete(ctx, pv.Name, del); err != nil && !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("deleting PV %s: %w", pv.Name, err)
 	}
+
 	created, err := pvs.Create(ctx, newPV, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("recreating PV %s: %w", pv.Name, err)
@@ -259,13 +257,12 @@ func (m *Manager) migrateStaleVolumes(ctx context.Context, mounted []device.Devi
 	return nil
 }
 
-// syncTopologyKeys keeps this node's CSINode driver entry's topologyKeys in
-// sync with whichever devices are currently mounted. It removes and re-adds the
-// driver entry because the TopologyKeys of an existing one are immutable.
+// syncTopologyKeys removes and re-adds the driver entry because the TopologyKeys of
+// an existing one are immutable.
 func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []device.Device) error {
 	csiNodes := m.clientset.StorageV1().CSINodes()
 
-	csiNode, err := csiNodes.Get(ctx, m.nodeName, metav1.GetOptions{})
+	prevCSINode, err := csiNodes.Get(ctx, m.nodeName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil // node-driver-registrar hasn't registered this node yet
@@ -273,23 +270,18 @@ func (m *Manager) syncTopologyKeys(ctx context.Context, mounted []device.Device)
 		return err
 	}
 
-	idx := driverIndex(csiNode.Spec.Drivers, m.driverName)
+	idx := driverIndex(prevCSINode.Spec.Drivers, m.driverName)
 	if idx == -1 {
 		return nil // registrar hasn't registered this driver on this node yet
 	}
 
 	desired := desiredTopologyKeys(m.driverName, mounted)
-	if topologyKeysEqual(csiNode.Spec.Drivers[idx].TopologyKeys, desired) {
+	if topologyKeysEqual(prevCSINode.Spec.Drivers[idx].TopologyKeys, desired) {
 		return nil
 	}
 
-	// TopologyKeys on an *existing* driver entry is immutable, but adding and
-	// removing whole entries is not — update validation only compares entries
-	// present both before and after. So drop our entry and re-add it, rather
-	// than deleting the CSINode object: that object carries every CSI driver's
-	// registration on this node, so recreating it puts all of them at risk to
-	// change one field of ours. This also needs only the "update" verb.
-	entry := *csiNode.Spec.Drivers[idx].DeepCopy()
+	//
+	entry := *prevCSINode.Spec.Drivers[idx].DeepCopy()
 	entry.TopologyKeys = desired
 
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

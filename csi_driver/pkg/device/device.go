@@ -137,9 +137,7 @@ func (d Device) MountInfo() (source string, mounted bool) {
 	return source, mounted
 }
 
-// IsReadOnly reports whether d is mounted read-only. The kernel silently falls
-// back to a read-only mount when it will not write to a filesystem, so a device
-// can mount "successfully" and still be useless for volumes.
+// IsReadOnly reports whether d is mounted read-only.
 func (d Device) IsReadOnly() bool {
 	_, opts, mounted := d.mountEntry()
 	if !mounted {
@@ -221,11 +219,6 @@ func runCmd(com ...string) (error, string, string) {
 
 // MaybeRepair tries to fix a filesystem to prevent mounting read-only.
 // Read-only mount could occur if a usb device was removed before syncing fs.
-// Its intentionally aggressive, an option to control this could be added later.
-//
-// force skips the "is it already clean?" check and asks the checker to run even
-// when the superblock claims the filesystem is clean — for when the fs looks
-// fine but the kernel still refused to mount it writable.
 func (d Device) MaybeRepair(force bool) {
 
 	if !force {
@@ -237,35 +230,11 @@ func (d Device) MaybeRepair(force bool) {
 		}
 	}
 
-	// attempt fix
-	var fixCmd []string
-
-	// Get fstype
-	// err, fstype, _ := runCmd("blkid", "-o", "value", "-s", "TYPE", d.DevPath)
-	// if err == nil {
-	// 	fstype = strings.TrimSpace(string(fstype))
-	// 	if fstype != "" {
-	// 		fstype = strings.ToLower(strings.TrimSpace(fstype))
-	// 		switch fstype {
-	// 		case "vfat", "fat", "fat12", "fat16", "fat32", "msdos":
-	// 			fixCmd = []string{"fsck",}
-	// 		case "ext2", "ext3", "ext4":
-	// 			fallthrough
-	// 		default:
-	// 			break
-	// 		}
-	// 	}
-	// } else {
-	// 	util.Log.Error("blkid failed", "err", err)
-	// }
-	//
-	// -f forces a check even when the superblock says clean, but not every
-	// checker accepts it (fsck.vfat has no -f), so fall back to a plain repair.
 	attempts := [][]string{{"fsck", "-y", d.DevPath}}
 	if force {
 		attempts = [][]string{{"fsck", "-f", "-y", d.DevPath}, {"fsck", "-y", d.DevPath}}
 	}
-	for _, fixCmd = range attempts {
+	for _, fixCmd := range attempts {
 		util.Log.Info("fsck", "command", fixCmd)
 		err, stdout, stderr := runCmd(fixCmd...)
 		util.Log.Info("fsck", "stdout", stdout)
@@ -358,31 +327,31 @@ func (d Device) Unmount() {
 
 func (d Device) EnsureMounted() bool {
 	mountRetries := 3
-	if d.IsMounted() {
-		return d.repairIfReadOnly()
-	}
+	var mtpnt string
 	for i := 0; i < mountRetries; i++ {
-		d.Mount()
-		if d.IsMounted() {
-			return d.repairIfReadOnly()
+		mtpnt = d.Mount()
+		if mtpnt != "" {
+			goto rocheck
 		}
 		util.Log.Error("mounting failed", "attempt", i, "device", d)
 		time.Sleep(1 * time.Second)
 	}
+
 	util.Log.Info("trying to clear any stale mountpoint and retry", "device", d)
 	d.ClearStaleMount()
-	d.Mount()
-	if d.IsMounted() {
-		return d.repairIfReadOnly()
+	mtpnt = d.Mount()
+	if mtpnt != "" {
+		goto rocheck
 	}
 	util.Log.Error("** final attempt to mount failed **", "device", d)
 	return false
+
+	// Using goto for experimental purposes.
+rocheck:
+	return d.repairIfReadOnly()
 }
 
-// repairIfReadOnly deals with a device that mounted but came up read-only: the
-// mount worked and the fsck during it reported nothing, yet the kernel still
-// won't write to the filesystem. Unmount, force a repair, mount again. Reports
-// whether the device ended up usable, i.e. mounted and writable.
+// repairIfReadOnly deals with a device that mounted but came up read-only
 func (d Device) repairIfReadOnly() bool {
 	if !d.IsReadOnly() {
 		return true
