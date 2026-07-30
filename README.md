@@ -1,6 +1,6 @@
 # freeport
 
-A __Experimental__ [Kubernetes StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/) provisioner for volumes backed by removable USB drives, implemented as a CSI driver plus a manager (shim) that smooths over CSI/Kubernetes gaps (especially on older versions).
+A __Experimental__ [Kubernetes StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/) provisioner for volumes backed by removable USB drives, implemented as a CSI driver plus a manager (shim) that smooths over CSI/Kubernetes gaps.
 
 ## Design goals
 
@@ -20,6 +20,12 @@ A __Experimental__ [Kubernetes StorageClass](https://kubernetes.io/docs/concepts
 - Forcing driver-pod restarts to re-register, rather than having the manager edit Kubernetes objects, would likely fix some `NodeGetInfo`-polling gaps (below).
 
 ## Detailed design
+
+### Volume storage
+
+Volumes are provisioned as sub directories of the first useable partition found by the manager component on USB drives that match the AllowedTopologies key of the storage class.
+
+### System components
 
 [CSI](https://kubernetes-csi.github.io/docs/) works roughly as follows. In the diagram, <span style="color:#4285F4">Kubernetes objects, RPCs, and containers provided by Kubernetes or related projects are BLUE</span>. <span style="color:#8a8a8a">Pieces this repo implements are WHITE</span>. <span style="color:#34A853">Things you add to use the driver are GREEN</span> — a StorageClass matching your USB drives' types, and a Pod with a [PVC](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolumeclaims) using that StorageClass. (Not shown: the manager also runs as a DaemonSet and edits `CSINode` and PV objects.)
 
@@ -52,6 +58,14 @@ A DaemonSet (`freeport-manager`), one per node, running a reconcile loop against
 
 ## Running the whole stack
 
+### Requirements
+
+This was developed with:
+
+- Kubernetes 1.36 (client libraries pinned to `k8s.io/api` v0.36.2)
+- [CSI spec](https://github.com/container-storage-interface/spec) v1.12.0
+- Go 1.26
+
 ### Unit tests
 
 ```sh
@@ -59,7 +73,7 @@ cd csi_driver
 go test ./pkg/driver/... ./pkg/manager/...
 ```
 
-### locally (Tilt)
+### locally ([Tilt](https://tilt.dev/))
 
 `Tiltfile.tilt` builds the three images (`freeport-csi-controller`, `freeport-csi-driver`, `freeport-manager`) and deploys a kustomize overlay (`KUSTOMIZE_DIR`, defaults to `kustomize/base`).
 
