@@ -1,8 +1,6 @@
 # freeport
 
-A *Experimental* [Kubernetes StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/) provisioner for volumes backed by removable USB drives, implemented as a CSI driver plus a manager (shim) that smooths over CSI/Kubernetes gaps (especially on older versions).
-
-
+A __Experimental__ [Kubernetes StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/) provisioner for volumes backed by removable USB drives, implemented as a CSI driver plus a manager (shim) that smooths over CSI/Kubernetes gaps (especially on older versions).
 
 ## Design goals
 
@@ -51,11 +49,6 @@ A DaemonSet (`freeport-manager`), one per node, running a reconcile loop against
 3. **Sync CSINode topology keys** by removing and re-adding the driver's `CSINodeDriver` entry (retrying on conflict), since `TopologyKeys` can't be edited in place.
 4. **Migrate volumes**: if a device turns up on a node other than its PV's pinned `nodeAffinity`, and a pod bound to that claim is scheduled elsewhere, the manager strips the PV's finalizers, recreates it pinned to the current node, and deletes the misplaced pod so it reschedules.
 5. **Repair read-only mounts** — a device that mounts read-only (usually from an unclean unplug) gets `fsck -f -y` and a remount.
-
-**How to test:**
-
-- Unit: `go test ./pkg/manager/...` from `csi_driver/`.
-- E2E: chainsaw's `topology-followed-broad`/`-narrow` confirm topology labels actually steer scheduling; migration itself needs real hardware (move a device between two nodes and watch the PV/pod follow).
 
 ## Running the whole stack
 
