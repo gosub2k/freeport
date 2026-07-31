@@ -27,9 +27,9 @@ Volumes are provisioned as sub directories of the first useable partition found 
 
 ### System components
 
-[CSI](https://kubernetes-csi.github.io/docs/) works roughly as follows. In the diagram, <span style="color:#4285F4">Kubernetes objects, RPCs, and containers provided by Kubernetes or related projects are BLUE</span>. <span style="color:#8a8a8a">Pieces this repo implements are WHITE</span>. <span style="color:#34A853">Things you add to use the driver are GREEN</span> — a StorageClass matching your USB drives' types, and a Pod with a [PVC](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolumeclaims) using that StorageClass. (Not shown: the manager also runs as a DaemonSet and edits `CSINode` and PV objects.)
+[CSI](https://kubernetes-csi.github.io/docs/) works roughly as follows. In the diagram, Kubernetes objects, RPCs, and containers provided by Kubernetes or related projects are <span style="color:#1971c2">BLUE</span>. Pieces this repo implements are <span style="color:#8a8a8a">WHITE</span>. Things you add to use the driver are <span style="color:#2f9e44">GREEN</span> — a StorageClass matching your USB drives' types, and a Pod with a [PVC](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolumeclaims) using that StorageClass. (Not shown: the manager. K8s components this touches are shown in <span style="color:#e88c8c">PINK</span>, the `CSINode` and PV objects.)
 
-![Architecture diagram](csi_diagram.png)
+![Architecture diagram](csi_diagram.svg)
 ### `csi_driver/cmd/driver` — Node plugin
 
 A DaemonSet (`freeport-csi-driver`), one per node, paired with a `node-driver-registrar` sidecar, serving CSI `Identity` and `Node` over a Unix socket.
